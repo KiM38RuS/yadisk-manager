@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # ── Настройки ─────────────────────────────────────────────
 
 # GitHub-репозиторий: "username/repo". ЗАПОЛНИТЬ перед релизом!
-UPDATE_REPO = ""
+UPDATE_REPO = "KiM38RuS/yadisk-manager"
 
 # Интервал авто-проверки во время работы (мс): 4 часа
 UPDATE_CHECK_INTERVAL_MS = 4 * 3600 * 1000
