@@ -1,0 +1,445 @@
+"""
+Фоновые потоки (QThread) для YaDisk Manager:
+- _WorkerThread, _SyncThread, _ApiListThread, _AllFilesThread
+- _FolderDownloadThread, _RecentFilesThread, _SearchThread
+- _MetaFetchThread, _StartupScanThread, _AutoDownloadThread
+"""
+
+import hashlib
+import logging
+import os
+
+from PySide6.QtCore import QThread, Signal
+
+import db
+import disk_api
+import sync
+from ui_shared import _local_path
+
+logger = logging.getLogger("ui.threads")
+
+
+class WorkerThread(QThread):
+    """Поток для воркера (скачивание/загрузка с прогрессом).
+
+    Воркер перемещается в этот поток (для корректной работы сигналов),
+    но run() воркера вызывается напрямую из QThread.run().
+    """
+
+    def __init__(self, worker):
+        super().__init__()
+        self._worker = worker
+        worker.moveToThread(self)
+
+    def run(self):
+        self._worker.run()
+
+    def cancel(self):
+        self._worker.cancel()
+        self.quit()
+        self.wait(3000)
+
+
+class SyncThread(QThread):
+    """Фоновый поток для полной синхронизации."""
+    finished = Signal(dict)
+    auth_error = Signal(str)
+
+    def __init__(self, api, database, cache_dir, parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._database = database
+        self._cache_dir = cache_dir
+
+    def cancel(self):
+        self.quit()
+        self.wait(3000)
+
+    def run(self):
+        logger.info("SyncThread: starting full sync...")
+        try:
+            result = sync.full_sync(self._api, self._database,
+                                    self._cache_dir)
+            logger.info("SyncThread: done -> %s", result)
+            self.finished.emit(result)
+        except disk_api.AuthError as e:
+            logger.error("SyncThread auth error: %s", e)
+            self.auth_error.emit(str(e))
+        except Exception as e:
+            logger.error("SyncThread error: %s", e)
+            self.finished.emit({"matched": 0, "uploaded": 0,
+                                "downloaded": 0, "moved": 0,
+                                "deleted": 0})
+
+
+class ApiListThread(QThread):
+    """Поток для фонового запроса списка файлов/папок с API."""
+    finished = Signal(list, str)  # items, error_msg
+
+    def __init__(self, api, path: str, parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._path = path
+
+    def run(self):
+        logger.info("ApiListThread: fetching %s...", self._path)
+        try:
+            items = self._api.list_folder(self._path)
+            logger.info("ApiListThread: %s -> %d items", self._path, len(items))
+            self.finished.emit(items, "")
+        except Exception as e:
+            logger.error("ApiListThread: %s FAILED: %s", self._path, e)
+            self.finished.emit([], str(e))
+
+
+class AllFilesThread(QThread):
+    """Фоновый поток: загрузка ВСЕХ файлов с Диска постранично с сохранением прогресса.
+
+    Фичи:
+    - Постраничная загрузка (по 200 файлов)
+    - Сохранение offset в config.json после каждой страницы
+    - Авто-ретрай при обрыве (до 5 попыток, 3 сек пауза)
+    - Докачка после перезапуска программы
+    - Прогресс в статус-бар (через signal)
+    """
+    finished = Signal(int)        # всего загружено файлов (счётчик), 0 = неудача
+    progress = Signal(int, int)   # offset, текущее количество
+
+    PAGE_LIMIT = 200
+    MAX_RETRIES = 5
+    RETRY_DELAY_MS = 3000
+
+    def __init__(self, api, database, parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._database = database
+        self._stop_requested = False
+
+    def request_stop(self):
+        """Попросить поток остановиться (вызывать из главного потока)."""
+        self._stop_requested = True
+
+    def run(self):
+        offset = db.get_all_files_offset()
+        loaded = 0
+        retries = 0
+
+        logger.info("AllFilesThread: loading all files (resume offset=%d)...", offset)
+
+        while True:
+            if self._stop_requested:
+                logger.info("AllFilesThread: stop requested")
+                db.set_all_files_offset(offset)
+                self.finished.emit(loaded)
+                return
+
+            try:
+                page = self._api.get_all_files_page(self.PAGE_LIMIT, offset)
+            except Exception as e:
+                retries += 1
+                logger.error(
+                    "AllFilesThread: error at offset=%d (retry %d/%d): %s",
+                    offset, retries, self.MAX_RETRIES, e,
+                )
+                # Сохраняем прогресс
+                db.set_all_files_offset(offset)
+
+                if retries >= self.MAX_RETRIES:
+                    logger.error("AllFilesThread: max retries exceeded")
+                    self.finished.emit(loaded)
+                    return
+
+                # Ждём перед повтором (в фоновом потоке — не блокирует GUI)
+                self.msleep(self.RETRY_DELAY_MS)
+                continue  # повтор с тем же offset
+
+            # Пустая страница = конец списка
+            if not page:
+                break
+
+            # Сохраняем в БД
+            try:
+                self._database.upsert_files_batch(page)
+            except Exception as e:
+                logger.error("AllFilesThread: DB insert failed: %s", e)
+                self.finished.emit(loaded)
+                return
+
+            loaded += len(page)
+            offset += self.PAGE_LIMIT
+            retries = 0  # удачный запрос сбрасывает счётчик ретраев
+
+            # Сохраняем прогресс
+            db.set_all_files_offset(offset)
+            self.progress.emit(offset, loaded)
+
+        # Успех — все файлы загружены, сбрасываем offset
+        db.set_all_files_offset(0)
+        logger.info("AllFilesThread: %d files loaded", loaded)
+        self.finished.emit(loaded)
+
+
+class FolderDownloadThread(QThread):
+    """Фоновый поток: BFS-обход папки, сбор файлов в БД, классификация для toggle.
+
+    download_mode=True: собирает только файлы для скачивания (cloud_only, нет локально)
+    download_mode=False: собирает только файлы для удаления (downloaded)
+    """
+
+    finished = Signal(list, list)  # to_download: list[str], to_remove: list[str]
+
+    def __init__(self, api, database, folder_paths: list[str],
+                 download_mode: bool = True, parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._database = database
+        self._folder_paths = folder_paths
+        self._download_mode = download_mode
+
+    def run(self):
+        logger.info("FolderDownloadThread: BFS %d folder(s)...", len(self._folder_paths))
+        all_items: list[dict] = []
+        try:
+            from collections import deque
+            for root in self._folder_paths:
+                queue = deque([root])
+                while queue:
+                    path = queue.popleft()
+                    try:
+                        items = self._api.list_folder(path)
+                    except Exception as e:
+                        logger.error("FolderDownloadThread: failed to list %s: %s",
+                                     path, e)
+                        continue
+                    all_items.extend(items)
+                    for item in items:
+                        if item["type"] == "dir":
+                            queue.append(item["path"])
+            if all_items:
+                self._database.upsert_files_batch(all_items)
+            logger.info("FolderDownloadThread: %d items collected", len(all_items))
+        except Exception as e:
+            logger.error("FolderDownloadThread failed: %s", e)
+            self.finished.emit([], [])
+            return
+
+        # Классифицируем через БД (рекурсия безопасна — глубина мала)
+        to_download: list[str] = []
+        to_remove: list[str] = []
+        try:
+            for root in self._folder_paths:
+                self._collect_via_db(root, to_download, to_remove,
+                                     self._download_mode)
+        except Exception as e:
+            logger.error("FolderDownloadThread classify failed: %s", e)
+        self.finished.emit(to_download, to_remove)
+
+    def _collect_via_db(self, cloud_path: str, dl: list[str], rm: list[str],
+                        download_mode: bool):
+        """Рекурсивно собрать файлы под cloud_path через БД (без API).
+
+        Если download_mode=True — собираем только файлы для скачивания.
+        Если download_mode=False — собираем только файлы для удаления.
+        """
+        for f in self._database.get_children(cloud_path):
+            if f["type"] == "dir":
+                self._collect_via_db(f["cloud_path"], dl, rm, download_mode)
+            elif download_mode and f["status"] in ("cloud_only", "syncing"):
+                # Режим скачивания: только cloud_only, которых нет локально
+                lp = _local_path(f["cloud_path"])
+                if os.path.exists(lp):
+                    # Уже есть локально — просто обновляем БД, не качаем
+                    logger.info("FolderDownloadThread: file exists locally, "
+                                "updating DB: %s", f["cloud_path"])
+                    self._database.set_downloaded(f["cloud_path"], lp)
+                    # НЕ добавляем в rm — не удаляем!
+                else:
+                    dl.append(f["cloud_path"])
+            elif not download_mode and f["status"] == "downloaded":
+                # Режим удаления: только downloaded/modified
+                rm.append(f["cloud_path"])
+
+
+class RecentFilesThread(QThread):
+    """Фоновый поток для загрузки недавно изменённых файлов (быстрый polling)."""
+    finished = Signal(list)
+
+    def __init__(self, api, parent=None):
+        super().__init__(parent)
+        self._api = api
+
+    def run(self):
+        try:
+            items = self._api.get_recent_uploaded(limit=50)
+            self.finished.emit(items)
+        except Exception:
+            self.finished.emit([])
+
+
+class SearchThread(QThread):
+    """Фоновый поток для глобального поиска по БД (по имени)."""
+    finished = Signal(list)  # list[dict]
+
+    def __init__(self, database, query, parent=None):
+        super().__init__(parent)
+        self._db = database
+        self._query = query
+
+    def run(self):
+        try:
+            results = self._db.search_by_name(self._query)
+            self.finished.emit(results)
+        except Exception:
+            self.finished.emit([])
+
+
+class MetaFetchThread(QThread):
+    """Фоновый поток для запроса метаданных файла в облаке."""
+    finished = Signal(dict)
+
+    def __init__(self, api, cloud_path, parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._cloud_path = cloud_path
+
+    def run(self):
+        try:
+            meta = self._api.get_meta(self._cloud_path)
+            self.finished.emit({
+                "cloud_md5": meta.get("md5", ""),
+                "cloud_modified": meta.get("modified", ""),
+                "cloud_size": meta.get("size", 0),
+                "cloud_path": self._cloud_path,
+            })
+        except Exception:
+            self.finished.emit({
+                "cloud_md5": "",
+                "cloud_modified": "",
+                "cloud_size": 0,
+                "cloud_path": self._cloud_path,
+            })
+
+
+class StartupScanThread(QThread):
+    """Фоновый поток для стартового сканирования: stale, changed, new files."""
+    finished = Signal(set, set, set)  # stale, changed, new_files
+
+    def __init__(self, database, cache_dir, parent=None):
+        super().__init__(parent)
+        self._database = database
+        self._cache_dir = cache_dir
+
+    def run(self):
+        logger.info("StartupScanThread: scanning local cache...")
+        stale: set[str] = set()
+        changed: set[str] = set()
+        new_files: set[str] = set()
+
+        try:
+            # 1. All downloaded files from DB — check existence + md5
+            for rec in self._database.get_by_status("downloaded"):
+                try:
+                    local_path = rec.get("local_path") or self._local_path(rec["cloud_path"])
+                    if not os.path.exists(local_path):
+                        stale.add(rec["cloud_path"])
+                        continue
+                    local_md5 = self._md5_file(local_path)
+                    last_sync_md5 = rec.get("last_sync_md5") or rec.get("md5") or ""
+                    if last_sync_md5 and local_md5 != last_sync_md5:
+                        changed.add(rec["cloud_path"])
+                except Exception:
+                    continue
+
+            # 2. New files in cache not tracked in DB
+            cache_dir_norm = self._cache_dir.replace("\\", "/")
+            known_local = set()
+            for rec in self._database.get_by_status("downloaded"):
+                lp = rec.get("local_path") or self._local_path(rec["cloud_path"])
+                if lp:
+                    known_local.add(lp.replace("\\", "/").lower())
+
+            for root, _dirs, files in os.walk(self._cache_dir):
+                for fname in files:
+                    if fname.startswith(".") or fname.startswith("~") or fname.endswith("~") or fname.endswith(".tmp"):
+                        continue
+                    fpath = os.path.join(root, fname).replace("\\", "/")
+                    if fpath.lower() in known_local:
+                        continue
+                    new_files.add(fpath)
+
+        except Exception as e:
+            logger.error("StartupScanThread error: %s", e)
+
+        logger.info("StartupScanThread: stale=%d, changed=%d, new=%d",
+                     len(stale), len(changed), len(new_files))
+        self.finished.emit(stale, changed, new_files)
+
+    @staticmethod
+    def _local_path(cloud_path: str) -> str:
+        """Compute local path from cloud path."""
+        rel = cloud_path.lstrip("/").replace("/", "\\")
+        return os.path.join(os.path.expanduser("~"), ".yadisk-cache", rel)
+
+    @staticmethod
+    def _md5_file(filepath: str, chunk_size: int = 64 * 1024) -> str:
+        h = hashlib.md5()
+        with open(filepath, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+
+
+class AutoDownloadThread(QThread):
+    """Фоновый поток для поиска cloud_only-файлов в полностью скачанных папках.
+
+    Определяет, какие файлы нужно автоматически скачать, и возвращает
+    список cloud_path-ов на главный поток (который запускает скачивание).
+    """
+    finished = Signal(list)  # list[str] — cloud_paths для скачивания
+
+    def __init__(self, database, parent=None):
+        super().__init__(parent)
+        self._database = database
+
+    def run(self):
+        logger.info("AutoDownloadThread: analyzing folders...")
+        try:
+            # Быстрый выход: нет скачанных файлов → нет synced-папок
+            if self._database.count_by_status("downloaded") == 0:
+                self.finished.emit([])
+                return
+
+            cloud_only = self._database.get_by_status("cloud_only")
+            parents: dict[str, list[str]] = {}
+            for rec in cloud_only:
+                if rec.get("type") != "file":
+                    continue
+                cp = rec["cloud_path"]
+                parts = cp.rstrip("/").split("/")
+                parent = "/".join(parts[:-1]) if len(parts) > 2 else "/"
+                parents.setdefault(parent, []).append(cp)
+
+            if not parents:
+                self.finished.emit([])
+                return
+
+            to_download: list[str] = []
+            for parent, orphans in parents.items():
+                siblings = self._database.get_children(parent)
+                other_files = [s for s in siblings
+                               if s["type"] == "file" and s["cloud_path"] not in orphans]
+                if not other_files:
+                    continue  # папка состоит только из orphans
+                all_synced = all(s["status"] == "downloaded" for s in other_files)
+                if all_synced:
+                    to_download.extend(orphans)
+
+            logger.info("AutoDownloadThread: %d file(s) to auto-download",
+                        len(to_download))
+            self.finished.emit(to_download)
+        except Exception as e:
+            logger.warning("AutoDownloadThread failed: %s", e)
+            self.finished.emit([])
