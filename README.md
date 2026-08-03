@@ -1,6 +1,6 @@
 # ☁️ YaDisk Manager
 
-[![Version](https://img.shields.io/badge/version-0.11.7-blue)](https://github.com/KiM38RuS/yadisk-manager/releases)
+[![Version](https://img.shields.io/badge/version-0.11.8-blue)](https://github.com/KiM38RuS/yadisk-manager/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-orange)]()
 
@@ -52,7 +52,9 @@
 | **Прогресс** | Реальный % при скачивании/загрузке |
 | **Конфликты** | Диалог: локальный / облачный / отмена |
 | **Системный трей** | Иконка в лотке |
-| **Автозапуск** | Настройка (реестр Windows) |
+| **Бесшумный режим** | Запуск только иконкой в трее (`--silent`); окно — по клику на трей |
+| **Автозапуск** | Настройка (реестр Windows), запуск в бесшумном режиме |
+| **Обновления** | Авто-проверка; бета-версии (опция); бесшумные (опция, применяются при перезапуске) |
 | **Выбор темы** | Системная / светлая / тёмная |
 | **Сохранение положения окна** | Настройка (геометрия запоминается) |
 
