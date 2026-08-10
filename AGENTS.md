@@ -3,7 +3,7 @@
 > Identity: Python developer, PySide6 GUI, REST API integrations.
 > Language: user speaks Russian, code/replies in Russian or English.
 > Knowledge base root: `D:\\YandexDisk\\Sync\\Coding\\AIWikiVault`
-> Current version: **0.11.8** (see `Backup/` for history)
+> Current version: **0.11.9** (see `Backup/` for history)
 >
 > ## 📦 Версии и бэкапы
 >
