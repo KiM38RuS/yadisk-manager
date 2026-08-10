@@ -187,6 +187,12 @@ class MainWindow(QMainWindow):
         self._search_debounce.setSingleShot(True)
         self._search_debounce.timeout.connect(self._do_search)
         self._search_debounce_ms = 300      # ждать 300ms паузы ввода перед запуском поиска
+        # История поиска: сохранять запрос только при Enter или паузе >2с,
+        # а не на каждый введённый символ (в истории не копятся обрывки)
+        self._search_history_timer = QTimer(self)
+        self._search_history_timer.setSingleShot(True)
+        self._search_history_timer.timeout.connect(self._save_search_history)
+        self._search_history_ms = 2000
 
         # Предотвращение рекурсии при перекрёстном снятии выделения
         self._selection_updating = False
@@ -364,8 +370,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Ошибка загрузки папок: {error}")
         else:
             self.tree_model.populate_children("/", items)
-            logger.info("Tree loaded: root has %d children",
-                        len(self.tree_model._root.children))
+            logger.info("Tree loaded: %d top-level folders",
+                        len(self.tree_model._visible_root.children))
+            # Корень «Яндекс Диск» всегда раскрыт
+            self._expand_tree_root()
         self._hide_tree_loading()
         # Фокус на дерево папок (а не на строку поиска),
         # только когда оно реально видимо после снятия loading-оверлея
@@ -423,6 +431,8 @@ class MainWindow(QMainWindow):
         new_paths = {i["path"] for i in items}
         if new_paths != self.table_model.current_paths:
             self._sort_table_sync(path, items)
+        # Колонка «Расположение» — только в режиме поиска
+        self._update_location_column()
         self.statusBar().showMessage(f"{path} — {len(items)} эл.", 5000)
         self._schedule_toolbar_update()
         self._hide_table_loading()
@@ -481,6 +491,20 @@ class MainWindow(QMainWindow):
         path = item.cloud_path
         self._fetch_folder_list(path, lambda items, err: self._on_tree_children_loaded(items, err, path))
 
+    def _expand_tree_root(self):
+        """Развернуть корневой узел «Яндекс Диск» (индекс 0,0)."""
+        root_idx = self.tree_model.index(0, 0)
+        if root_idx.isValid():
+            self.tree_view.expand(root_idx)
+
+    def _on_tree_collapsed(self, index: QModelIndex):
+        """Корень «Яндекс Диск» всегда раскрыт — сворачивание отменяется."""
+        if not index.isValid():
+            return
+        item: FolderTreeItem = index.internalPointer()
+        if item is self.tree_model._visible_root:
+            self.tree_view.expand(index)
+
     def _on_tree_children_loaded(self, items, error, cloud_path: str):
         """Подпапки загружены — добавляем в модель дерева."""
         if error:
@@ -513,6 +537,8 @@ class MainWindow(QMainWindow):
         self.table_model.set_path(path, items)
         self.table_sort_model.sort(col, order)
         self.table_sort_model.setDynamicSortFilter(True)
+        # В режиме поиска индикатор сортировки скрыт — вернуть его при навигации
+        self.table_view.horizontalHeader().setSortIndicatorShown(True)
 
     def _run_full_sync(self):
         """Запустить полную синхронизацию в фоновом потоке."""
@@ -597,11 +623,15 @@ class MainWindow(QMainWindow):
         # _apply_theme() также убирает palette(AlternateBase/Midlight) — заменяет на hex.
         self.tree_view.clicked.connect(self._on_folder_clicked)
         self.tree_view.expanded.connect(self._on_tree_item_expanded)
+        self.tree_view.collapsed.connect(self._on_tree_collapsed)
         self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(
             self._on_tree_context_menu)
         self.tree_view.selectionModel().selectionChanged.connect(
             self._on_tree_selection_changed)
+        # Корень «Яндекс Диск» всегда раскрыт: при любом сбросе модели
+        # (refresh/перезагрузка дерева) снова разворачиваем его
+        self.tree_model.modelReset.connect(self._expand_tree_root)
         # Клик по пустому месту — сброс выделения
         self.tree_view.viewport().installEventFilter(self)
         self.tree_view.viewport().setAcceptDrops(True)
@@ -641,6 +671,8 @@ class MainWindow(QMainWindow):
         self.table_view.setColumnWidth(1, 300)  # Имя
         self.table_view.setColumnWidth(3, 100)  # Изменён
         self.table_view.setColumnWidth(4, 180)  # Расположение
+        # Колонка «Расположение» видна только в результатах поиска
+        self.table_view.setColumnHidden(4, True)
         self.table_view.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Fixed)
         self.table_view.horizontalHeader().setSectionResizeMode(
@@ -705,21 +737,36 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         # Статусбар
+        # Волновой спиннер Брайля — показывается перед надписью
+        # («Закрытие программы...», «Перезагрузка программы...»)
+        self._status_spinner = _BrailleSpinner(
+            fill_parent=False, font_size=14)
+        self._status_spinner.hide()
+        self.statusBar().insertWidget(0, self._status_spinner)
+
         self._status_label = QLabel("")
         self.statusBar().addWidget(self._status_label, 1)
 
-        # Ссылка «Показать лог» — слева от прогресс-бара
+        # Ссылка «Показать лог» и прогресс-бар — в одном контейнере,
+        # чтобы скрытие прогресс-бара не сдвигало надпись (ПЛАНЫ 6.1)
+        self._status_right = QWidget()
+        self._status_right_layout = QHBoxLayout(self._status_right)
+        self._status_right_layout.setContentsMargins(0, 0, 0, 0)
+        self._status_right_layout.setSpacing(8)
+
         self._log_label = QLabel("Показать лог")
         self._log_label.setCursor(Qt.PointingHandCursor)
         self._log_label.mousePressEvent = lambda e: self._toggle_log_window()
         self._update_log_label_style()
-        self.statusBar().addPermanentWidget(self._log_label)
+        self._status_right_layout.addWidget(self._log_label)
 
         self._status_progress = QProgressBar()
         self._status_progress.setMaximumWidth(200)
         self._status_progress.setMinimumWidth(120)
         self._status_progress.setVisible(False)
-        self.statusBar().addPermanentWidget(self._status_progress)
+        self._status_right_layout.addWidget(self._status_progress)
+
+        self.statusBar().addPermanentWidget(self._status_right)
 
         # Применить сохранённую тему при запуске
         self._apply_theme()
@@ -837,6 +884,9 @@ class MainWindow(QMainWindow):
             tooltip_bg, tooltip_text, tooltip_border = "#383838", "#FFFFFF", "#555555"
         else:
             tooltip_bg, tooltip_text, tooltip_border = "#ffffe5", "#000000", "#C0C0C0"
+
+        # Popup истории поиска: фон в тон строке поиска тулбара
+        popup_bg = "#252526" if is_dark else "#FFFFFF"
 
         if is_dark:
             tb_qss = """
@@ -960,6 +1010,25 @@ class MainWindow(QMainWindow):
             f"}}\n"
             f"QHeaderView::section:highlighted {{\n"
             f"    font-weight: normal;\n"
+            f"}}\n"
+            # Popup истории поиска (QListView#search_history_popup):
+            # hover-подсветка в акцент темы + выделение как у дерева/таблицы
+            f"QListView#search_history_popup {{\n"
+            f"    background-color: {popup_bg};\n"
+            f"    color: {fg};\n"
+            f"    border: 1px solid {border};\n"
+            f"    padding: 2px;\n"
+            f"}}\n"
+            f"QListView#search_history_popup::item {{\n"
+            f"    padding: 4px 8px;\n"
+            f"    border-radius: 4px;\n"
+            f"}}\n"
+            f"QListView#search_history_popup::item:hover {{\n"
+            f"    background: rgba(64, 150, 255, 0.12);\n"
+            f"}}\n"
+            f"QListView#search_history_popup::item:selected {{\n"
+            f"    background: {bg_sel};\n"
+            f"    color: {fg};\n"
             f"}}\n"
             + tb_qss
         )
@@ -1349,6 +1418,8 @@ class MainWindow(QMainWindow):
         self._search_edit.setMaximumWidth(220)
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.textChanged.connect(self._on_search)
+        self._search_edit.returnPressed.connect(self._on_search_enter)
+        self._search_edit.escapePressed.connect(self._exit_search)
         tb.addWidget(self._search_edit)
 
         # Отступ от правого края окна
@@ -1454,7 +1525,8 @@ class MainWindow(QMainWindow):
         if tree_rows:
             for idx in tree_rows:
                 cp = idx.data(Qt.UserRole)
-                if cp:
+                # Корень диска («Яндекс Диск») — только навигация, не операция
+                if cp and cp != "/":
                     if self._db.is_folder_fully_synced(cp):
                         statuses.add("downloaded")
                     else:
@@ -1736,6 +1808,7 @@ class MainWindow(QMainWindow):
 
     def _tray_exit(self):
         """Полностью закрыть программу (Выход из трея)."""
+        self._show_status_spinner("Закрытие программы...")
         self._maybe_apply_pending_update()  # бесшумное обновление
         self._force_close = True
         self._tray.hide()
@@ -1743,11 +1816,17 @@ class MainWindow(QMainWindow):
         self._tray.deleteLater()
         self.close()
 
-    def _menu_quit(self):
-        """Полностью закрыть программу (Выход)."""
+    def _menu_quit(self, show_spinner_text: bool = True):
+        """Полностью закрыть программу (Выход).
+
+        show_spinner_text=False — надпись уже показана вызывающим
+        (перезагрузка: «Перезагрузка программы...»), не перезаписывать.
+        """
         if getattr(self, "_quitting", False):
             return
         self._quitting = True
+        if show_spinner_text:
+            self._show_status_spinner("Закрытие программы...")
         self._maybe_apply_pending_update()  # бесшумное обновление
         self._force_close = True
         try:
@@ -1793,6 +1872,7 @@ class MainWindow(QMainWindow):
     def _restart_app(self):
         """Перезапустить программу без подтверждения."""
         logger.info("Restarting application...")
+        self._show_status_spinner("Перезагрузка программы...")
         # Сохраняем положения окон
         if db.get_save_window_geometry():
             db.set_window_geometry(
@@ -1804,9 +1884,9 @@ class MainWindow(QMainWindow):
         # выйдет — Менеджер просто закроется без нового окна).
         script = os.path.join(os.path.dirname(__file__), "main.py")
         subprocess.Popen([sys.executable, script, "--restart"])
-        # Закрываем текущий
+        # Закрываем текущий (надпись «Перезагрузка программы...» сохраняется)
         self._force_close = True
-        self._menu_quit()
+        self._menu_quit(show_spinner_text=False)
 
     def _logout_and_reauth(self):
         """Выйти из аккаунта: очистить токен и показать диалог авторизации."""
@@ -2959,6 +3039,21 @@ class MainWindow(QMainWindow):
             self._status_progress.setVisible(False)
             self._status_label.setText("")
 
+    def _show_status_spinner(self, text: str):
+        """Показать в статус-баре волновой спиннер Брайля и текст.
+
+        Используется при необратимых действиях (закрытие/перезагрузка),
+        поэтому сразу прокручиваем события — надпись должна быть видна
+        ещё до блокирующих операций (применение обновления и т.п.).
+        """
+        self._status_spinner.show()
+        self._status_label.setText(text)
+        QApplication.processEvents()
+
+    def _hide_status_spinner(self):
+        self._status_spinner.hide()
+        self._status_label.setText("")
+
     # ── Навигация ─────────────────────────────────────────
 
     def dragEnterEvent(self, event):
@@ -3313,7 +3408,9 @@ class MainWindow(QMainWindow):
         # и ломает прокси→source маппинг при F2
         self._search_mode = False
         self._search_query = ""
+        self._search_history_timer.stop()
         self._search_edit.clear()
+        self._update_location_column()
         # Сохраняем выделение перед навигацией
         saved_selection = self._get_selected_cloud_paths()
         self._current_path = path
@@ -3350,7 +3447,11 @@ class MainWindow(QMainWindow):
             rows = self.tree_view.selectionModel().selectedRows(0)
             if rows:
                 cloud_path = rows[0].data(Qt.UserRole)
-                is_dir = True
+                # Корень диска не копируется целиком
+                if cloud_path == "/":
+                    cloud_path = None
+                else:
+                    is_dir = True
         else:
             rows = self.table_view.selectionModel().selectedRows(0)
             if rows:
@@ -3588,7 +3689,10 @@ class MainWindow(QMainWindow):
             # Только дерево имеет выделение → обрабатываем папки рекурсивно
             for idx in tree_rows:
                 cloud_path = idx.data(Qt.UserRole)
-                if cloud_path:
+                # Корень диска («Яндекс Диск») — только навигация:
+                # «Сохранить на компьютере» скачала бы весь диск,
+                # «Оставить только в облаке» удалила бы весь локальный кеш
+                if cloud_path and cloud_path != "/":
                     pending_folders.append(cloud_path)
         elif table_rows:
             # Таблица имеет выделение → обрабатываем строки
@@ -3754,7 +3858,8 @@ class MainWindow(QMainWindow):
             tree_rows = self.tree_view.selectionModel().selectedRows(0)
             for idx in tree_rows:
                 cp = idx.data(Qt.UserRole) or ""
-                if cp:
+                # Корень диска не копируется/не вырезается
+                if cp and cp != "/":
                     items.append({"cloud_path": cp})
         else:
             rows = self.table_view.selectionModel().selectedRows(0)
@@ -4168,13 +4273,19 @@ class MainWindow(QMainWindow):
         item = self._get_item(index)
         if not item:
             return
-        # Режим поиска: по клику переходим в папку с файлом
+        # Режим поиска: папка → переход внутрь; файл → открыть (скачать из
+        # облака при необходимости). Результаты поиска при этом не сбрасываются,
+        # чтобы можно было сразу открыть следующий результат.
         if self._search_mode:
             if item["is_dir"]:
                 self._navigate_to_folder(item["cloud_path"])
+                return
+            local_path = _local_path(item["cloud_path"])
+            if item["status"] == "cloud_only" or not os.path.exists(local_path):
+                self._open_after_download.add(item["cloud_path"])
+                self._start_download(item["cloud_path"], local_path)
             else:
-                parent = "/".join(item["cloud_path"].rstrip("/").split("/")[:-1]) or "/"
-                self._navigate_to_folder(parent)
+                self._open_file(local_path)
             return
         if item.get("is_parent_nav"):
             self.tree_view.clearSelection()
@@ -4359,19 +4470,57 @@ class MainWindow(QMainWindow):
             # Очистка: выходим из режима поиска, показываем текущую папку
             if self._search_mode:
                 self._search_mode = False
-                self._search_query = ""
+                self._search_query = text
+                self._search_history_timer.stop()
                 self._load_folder_local(self._current_path)
+                self._update_location_column()
                 self._schedule_toolbar_update()
-            elif text:
-                # 1 символ — обычная фильтрация текущей папки
-                self.table_sort_model.set_search_text(text)
             else:
-                self.table_sort_model.set_search_text("")
+                # 1 символ (или пусто) — обычная фильтрация текущей папки
+                self._search_query = text
+                self.table_sort_model.set_search_text(text)
             return
 
         self._search_query = text
+        # История: перезапускаем таймер паузы — запрос сохранится,
+        # только если пользователь перестал печатать на >2с (или нажал Enter)
+        self._search_history_timer.start(self._search_history_ms)
         # Debounce: перезапускаем таймер при каждом вводе
         self._search_debounce.start(self._search_debounce_ms)
+
+    def _on_search_enter(self):
+        """Enter в строке поиска — немедленный поиск + запись в историю."""
+        q = self._search_edit.text().strip()
+        if len(q) < 2:
+            return
+        self._search_history_timer.stop()
+        self._save_search_query(q)
+        self._search_query = q
+        self._search_debounce.stop()
+        self._do_search()
+
+    def _save_search_history(self):
+        """Таймер паузы >2с сработал — сохранить текущий запрос в историю."""
+        q = self._search_edit.text().strip()
+        if len(q) >= 2:
+            self._save_search_query(q)
+
+    def _save_search_query(self, q: str):
+        """Сохранить запрос в историю поиска (дубликаты обновляют timestamp)."""
+        self._db.add_search_query(q)
+        self._search_edit.refresh_history()
+
+    def _exit_search(self):
+        """Esc в строке поиска — очистить строку и выйти из режима поиска."""
+        if self._search_edit.text():
+            self._search_edit.clear()  # textChanged → _on_search("") → выход из поиска
+        elif self._search_mode:
+            self._on_search("")
+        self.table_view.setFocus()
+
+    def _update_location_column(self):
+        """Колонка «Расположение» видна только в результатах поиска."""
+        self.table_view.setColumnHidden(4, not self._search_mode)
 
     def _focus_search(self):
         """Перевести фокус в строку поиска (Ctrl+F)."""
@@ -4383,27 +4532,33 @@ class MainWindow(QMainWindow):
         q = self._search_query
         if len(q) < 2:
             return
-        # Сохраняем запрос в историю поиска
-        self._db.add_search_query(q)
-        self._search_edit.refresh_history()
         self.statusBar().showMessage(f"🔍 Поиск: {q}…")
         thread = _SearchThread(self._db, q, self)
         thread.finished.connect(self._on_search_results)
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
-    def _on_search_results(self, results: list[dict]):
+    def _on_search_results(self, query: str, results: list[dict]):
         """Показать результаты поиска в таблице."""
+        # Защита от гонки: результат устаревшего запроса (пользователь уже
+        # очистил строку или ввёл новый текст) не должен перекрывать папку
+        if query != self._search_query:
+            logger.debug("Ignored stale search results for %r (current %r)",
+                         query, self._search_query)
+            return
         if not results:
-            self.statusBar().showMessage(f"«{self._search_query}» — ничего не найдено", 3000)
+            self.statusBar().showMessage(f"«{query}» — ничего не найдено", 3000)
             return
         self._search_mode = True
         self.table_model.set_search_results(results)
-        # Сбросить сортировку proxy-модели — результаты уже отсортированы по name ASC
+        # Результаты уже отсортированы по релевантности — отключаем
+        # proxy-сортировку (sort(-1)), иначе она переставит строки по имени
         self.table_sort_model.setDynamicSortFilter(False)
-        self.table_sort_model.sort(1, Qt.AscendingOrder)
+        self.table_sort_model.sort(-1, Qt.AscendingOrder)
         self.table_sort_model.setDynamicSortFilter(True)
-        self.statusBar().showMessage(f"🔍 Найдено: {len(results)} эл. по запросу «{self._search_query}»")
+        self.table_view.horizontalHeader().setSortIndicatorShown(False)
+        self._update_location_column()
+        self.statusBar().showMessage(f"🔍 Найдено: {len(results)} эл. по запросу «{query}»")
         self._schedule_toolbar_update()
 
     def _show_settings(self):
@@ -4606,6 +4761,18 @@ class MainWindow(QMainWindow):
         act = menu.addAction("Просмотреть на сайте",
                        lambda u=web_url: QDesktopServices.openUrl(QUrl(u)))
         act.setIcon(_svg_icon("external-link.svg", 24))
+
+        # Корень диска («Яндекс Диск») — только навигация и вставка:
+        # операции (копия/ссылка/ZIP/сохранить/оставить/вырезать) по всему
+        # диску опасны или бессмысленны, а агрегация статуса "/" сканирует
+        # всю БД и зависла бы UI
+        if cloud_path == "/":
+            if self._clipboard_buffer:
+                menu.addSeparator()
+                act = menu.addAction("Вставить", self._paste_from_buffer)
+                act.setIcon(_svg_icon("paste.svg", 24))
+            menu.exec(self.tree_view.viewport().mapToGlobal(pos))
+            return
 
         # 4. Создать копию на компьютере
         act = menu.addAction("Создать копию на компьютере", self._create_local_copy)

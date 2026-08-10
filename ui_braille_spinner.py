@@ -37,7 +37,7 @@ class BrailleSpinner(QWidget):
         (0x0B, 0x00),  # ⠋⠀
     ]
 
-    def __init__(self, parent=None, fill_parent=True):
+    def __init__(self, parent=None, fill_parent=True, font_size: int = 28):
         super().__init__(parent)
         self._fill_parent = fill_parent
         self._gap = -8          # px между центрами двух символов
@@ -46,7 +46,7 @@ class BrailleSpinner(QWidget):
         self.setFocusPolicy(Qt.NoFocus)
 
         font = QFont()
-        font.setPointSize(28)
+        font.setPointSize(font_size)
         self.setFont(font)
 
         self._left = QLabel(self)

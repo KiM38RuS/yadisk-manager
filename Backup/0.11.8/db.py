@@ -1140,17 +1140,38 @@ class Database:
     def search_by_name(self, query: str, limit: int = 200) -> list[dict]:
         """Глобальный поиск файлов/папок по имени (LIKE %query%).
 
-        Возвращает записи из БД для показа в таблице результатов поиска.
+        Результаты ранжируются по релевантности: точное совпадение имени >
+        имя начинается с запроса > имя содержит запрос; при равном типе
+        совпадения короче имя — выше. Папки немного выше файлов.
         """
         pattern = f"%{query}%"
+        q_lower = query.lower()
         with self._lock:
             rows = self._conn.execute(
                 "SELECT cloud_path, name, type, size, modified, md5, mime_type, status, local_path "
                 "FROM files WHERE lower_utf8(name) LIKE lower_utf8(?) "
-                "ORDER BY type DESC, name ASC LIMIT ?",
-                (pattern, limit),
+                "ORDER BY name ASC LIMIT ?",
+                (pattern, limit * 2),
             ).fetchall()
-        return [dict(r) for r in rows]
+        results = [dict(r) for r in rows]
+
+        def _rank(item: dict) -> float:
+            name = item["name"].lower()
+            if name == q_lower:
+                score = 100.0
+            elif name.startswith(q_lower):
+                score = 60.0
+            else:
+                score = 30.0
+            # Чем короче имя — тем точнее совпадение
+            score -= min(len(item["name"]), 100) * 0.1
+            # Папки чуть выше файлов (как раньше type DESC)
+            if item["type"] == "dir":
+                score += 5.0
+            return score
+
+        results.sort(key=_rank, reverse=True)
+        return results[:limit]
 
     # ── Search history ──────────────────────────────────────
 
@@ -1158,15 +1179,21 @@ class Database:
 
     def add_search_query(self, query: str) -> None:
         """Сохранить запрос в историю поиска. Дубликаты обновляют timestamp.
-        Старые записи сверх лимита удаляются."""
+        Старые записи сверх лимита удаляются.
+
+        last_used пишется с миллисекундами: SQLite datetime('now') имеет
+        точность 1с — несколько запросов за одну секунду не сортировались
+        бы по времени и в истории стояли бы в произвольном порядке.
+        """
         q = query.strip()
         if not q:
             return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         with self._lock:
             self._conn.execute(
-                "INSERT INTO search_history (query, last_used) VALUES (?, datetime('now')) "
-                "ON CONFLICT(query) DO UPDATE SET last_used=datetime('now')",
-                (q,),
+                "INSERT INTO search_history (query, last_used) VALUES (?, ?) "
+                "ON CONFLICT(query) DO UPDATE SET last_used=excluded.last_used",
+                (q, now),
             )
             # Оставить только последние SEARCH_HISTORY_LIMIT запросов
             self._conn.execute("""

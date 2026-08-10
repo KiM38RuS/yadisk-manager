@@ -3,6 +3,7 @@ FolderTreeItem, FolderTreeModel — модель дерева папок для 
 """
 
 import logging
+import os
 
 from PySide6.QtCore import Qt, QAbstractItemModel, QModelIndex
 from PySide6.QtGui import QIcon
@@ -11,6 +12,18 @@ import db
 from ui_shared import _svg_icon, _rotated_svg_icon, STATUS_ICON, is_animated_status, get_rotation_angle, get_current_frame
 
 logger = logging.getLogger("ui.tree_model")
+
+# Иконка приложения для корневого узла «Яндекс Диск» (кэшируется — QIcon
+# из .ico создаётся один раз, а не на каждый data() вызов)
+_APP_ICON = None
+
+
+def _app_icon() -> QIcon:
+    global _APP_ICON
+    if _APP_ICON is None:
+        path = os.path.join(os.path.dirname(__file__), "icon-main.ico")
+        _APP_ICON = QIcon(path) if os.path.isfile(path) else QIcon()
+    return _APP_ICON
 
 
 class FolderTreeItem:
@@ -45,6 +58,16 @@ class FolderTreeModel(QAbstractItemModel):
         self._db = database
         self._root = FolderTreeItem("root", "")
         self._root.loaded = False
+        self._create_visible_root()
+
+    def _create_visible_root(self):
+        """Создать видимый корневой узел «Яндекс Диск» (cloud_path = "/").
+
+        Это единственный верхнеуровневый элемент дерева; все папки диска
+        становятся его детьми. Клик по нему → навигация на корень диска.
+        """
+        self._visible_root = FolderTreeItem("Яндекс Диск", "/", parent=self._root)
+        self._root.children.append(self._visible_root)
 
     # ── async population ────────────────────────────────
 
@@ -80,7 +103,9 @@ class FolderTreeModel(QAbstractItemModel):
 
     def _find_item(self, cloud_path: str) -> FolderTreeItem | None:
         """Поиск узла по cloud_path (рекурсивно)."""
-        if cloud_path in ("", "/"):
+        if cloud_path == "/":
+            return self._visible_root
+        if cloud_path == "":
             return self._root
         return self._search_item(self._root, cloud_path)
 
@@ -138,6 +163,18 @@ class FolderTreeModel(QAbstractItemModel):
         if not index.isValid():
             return None
         item: FolderTreeItem = index.internalPointer()
+        # Видимый корень «Яндекс Диск»: постоянная иконка и без агрегации
+        # статуса — get_folder_aggregate_status("/") сканирует всю БД (100К+
+        # файлов) и зависла бы UI при первой отрисовке
+        if item is self._visible_root:
+            if role == Qt.DisplayRole:
+                return item.name
+            if role == Qt.DecorationRole:
+                # Значок самой программы (icon-main.ico), как в заголовке окна
+                return _app_icon()
+            if role == Qt.UserRole:
+                return item.cloud_path
+            return None
         if role == Qt.DisplayRole:
             status = item.status
             if status is None and self._db is not None:
@@ -174,6 +211,7 @@ class FolderTreeModel(QAbstractItemModel):
         """Сбросить модель (перезагрузка делается внешним кодом)."""
         self.beginResetModel()
         self._root.children.clear()
+        self._create_visible_root()
         self._root.loaded = False  # сброс — populate_children сможет заново наполнить
         self.endResetModel()
 
@@ -246,7 +284,8 @@ class FolderTreeModel(QAbstractItemModel):
         for idx in indexes:
             if idx.isValid() and idx.column() == 0:
                 cp = idx.data(Qt.UserRole)
-                if cp and cp not in seen:
+                # Корень диска («Яндекс Диск») не перетаскивается
+                if cp and cp != "/" and cp not in seen:
                     paths.append(cp)
                     seen.add(cp)
         if not paths:

@@ -397,7 +397,7 @@ class RecentFilesThread(QThread):
 
 class SearchThread(QThread):
     """Фоновый поток для глобального поиска по БД (по имени)."""
-    finished = Signal(list)  # list[dict]
+    finished = Signal(str, list)  # (query, results)
 
     def __init__(self, database, query, parent=None):
         super().__init__(parent)
@@ -407,9 +407,9 @@ class SearchThread(QThread):
     def run(self):
         try:
             results = self._db.search_by_name(self._query)
-            self.finished.emit(results)
+            self.finished.emit(self._query, results)
         except Exception:
-            self.finished.emit([])
+            self.finished.emit(self._query, [])
 
 
 class MetaFetchThread(QThread):
