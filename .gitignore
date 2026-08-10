@@ -40,7 +40,6 @@ LOG.txt
 
 # === Экспериментальные тесты и референсы ===
 Test/
-tests/
 bookmarks_tests/
 icon-dev/
 Reference/
@@ -48,6 +47,16 @@ Reference/
 wiki/
 # dev-инструмент замеров таймингов
 _timed_main.py
+
+# === tests/: в git — только pytest-набор; dev-мусор не трекаем ===
+tests/research.md
+tests/*.json
+tests/_explore_structure.py
+tests/hermes-verify-ui-final.py
+tests/*.pyw
+tests/test_reverse_sync_scenarios.py
+tests/test_sync_scenarios.py
+tests/test_double_braille_spinner.py
 
 # === Внутренние конфиги агентов ===
 .claude/
