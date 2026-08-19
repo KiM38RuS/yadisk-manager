@@ -33,14 +33,22 @@ venv/
 Thumbs.db
 
 # Coverage
-coverage/
-htmlcov/
-.coverage
+.coverage*
 
-# Build directories
-dist/
-build/
-target/
-.gradle/
-.mypy_cache/
-.pytest_cache/
+# AI и виртуальные окружения
+.claude/
+.pi/
+
+# Логи и временные файлы
+*.txt
+LOG.txt
+Backup/**/*.txt
+
+# Скомпилированные файлы и тесты
+YaDiskManager.exe
+Test/
+Reference/
+icon-dev/
+wiki/
+tests/text_*.json
+```

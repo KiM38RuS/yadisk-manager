@@ -1788,6 +1788,43 @@ class MainWindow(QMainWindow):
                 lw.raise_()
                 self.raise_()
 
+    def _sync_log_zorder(self):
+        """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
+        панели задач, клик по окну) лог поднимается на передний план сразу
+        за Менеджером. При потере фокуса лог НЕ опускается и НЕ прячется:
+        переключение в другое окно не должно делать лог невидимым (раньше
+        lw.lower() уводил его на дно z-order, под окно Менеджера); активное
+        чужое окно накроет лог само, если окна перекрываются. Лог прячется
+        только вместе со сворачиванием Менеджера (_on_manager_state_change).
+        Клик по логу поднимает его над Менеджером — «всегда поверх» нет."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None or not lw.isVisible() or self.isMinimized():
+            return
+        if self.isActiveWindow():
+            lw.raise_()
+            self.raise_()
+            # Подстраховка: raise() меняет z-order без смены фокуса, но если
+            # Windows всё же отдал фокус логу — вернуть его Менеджеру.
+            if QApplication.activeWindow() is lw:
+                QTimer.singleShot(0, self.activateWindow)
+
+    def _on_manager_state_change(self):
+        """При сворачивании Менеджера прятать окно лога (у него нет значка
+        на панели задач — вернуть его можно только вместе с Менеджером)."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None:
+            return
+        if self.isMinimized():
+            if lw.isVisible():
+                self._log_visible_before_minimize = True
+                lw.hide()
+        else:
+            if getattr(self, '_log_visible_before_minimize', False):
+                self._log_visible_before_minimize = False
+                lw.show()
+                lw.raise_()
+                self.raise_()
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
             self._sync_log_zorder()
@@ -2107,127 +2144,26 @@ class MainWindow(QMainWindow):
         self._show_left_busy("Проверка локальных файлов...")
 
         # Добавляем ref на поток, чтобы не собрался GC
-        thread = _StartupScanThread(self._db, cache_dir, self)
-        thread.finished.connect(lambda stale, changed, new_files, new_dirs:
-                                self._on_startup_scan_done(stale, changed, new_files, new_dirs))
+        thread = _StartupScanThread(self._api, self._db, cache_dir, self)
+        thread.finished.connect(self._on_startup_scan_done)
         thread.finished.connect(thread.deleteLater)
         self._startup_scan_thread = thread
         thread.start()
 
-    def _on_startup_scan_done(self, stale: set, changed: set, new_files: set, new_dirs: set | None = None):
+    def _on_startup_scan_done(self):
         """Обработка результатов стартового сканирования (главный поток)."""
-        if new_dirs is None:
-            new_dirs = set()
-        if getattr(self, '_cache_was_restored', False) and stale:
-            # Кеш был удалён, пользователь выбрал "Восстановить" —
-            # ставим все файлы на перекачку (через очередь, без блокировки)
-            self._show_left_busy(f"Восстанавливаю {len(stale)} файлов...")
-            for cp in stale:
-                if cp in self._syncing:
-                    continue
-                local_path = _local_path(cp)
-                self._syncing.add(cp)
-                self._download_queue.append((cp, local_path))
-                self.table_model.update_status(cp, "syncing")
-            self._process_download_queue()
-            logger.info("Restore: queued %d files for re-download", len(stale))
-        else:
-            # Stale — обновляем статус
-            for cp in stale:
-                self._db.set_cloud_only(cp)
-                self.table_model.update_item_status(cp, "cloud_only")
-                self._update_tree_status(cp)
-                logger.info("Startup: local file missing, set cloud_only: %s", cp)
-
-        # Changed — ставим на загрузку
-        changed_count = len(changed)
-        if changed_count:
-            logger.info("Startup: %d local files changed, will upload", changed_count)
-        for cp in changed:
-            info = self._db.get_file(cp)
-            if info and info.get("local_path") and os.path.exists(info["local_path"]):
-                self._register_new_file(info["local_path"], cp)
-            else:
-                self._pend_upload.add(cp)
-
-        # Новые папки на диске — создаём записи в БД
-        if new_dirs:
-            cache_dir_norm = _cache_dir().replace("\\", "/")
-            dir_count = 0
-            for dpath in new_dirs:
-                rel = dpath[len(cache_dir_norm):].lstrip("/")
-                cloud_path = "/" + rel
-                name = cloud_path.rstrip("/").split("/")[-1]
-                # Создаём все родительские папки
-                parts = cloud_path.strip("/").split("/")
-                for i in range(1, len(parts) + 1):
-                    parent = "/" + "/".join(parts[:i])
-                    if not self._db.get_file(parent):
-                        pname = parent.rstrip("/").split("/")[-1]
-                        self._db.upsert_file(parent, pname, "dir")
-                        self._db.set_status(parent, "downloaded")
-                # Отмечаем как downloaded
-                self._db.upsert_file(cloud_path, name, "dir")
-                self._db.set_downloaded(cloud_path, dpath)
-                dir_count += 1
-            logger.info("Startup: registered %d local directories", dir_count)
-
-        # New files — вычисляем cloud_path и ставим на загрузку
-        cache_dir_norm = _cache_dir().replace("\\", "/")
-        new_count = len(new_files)
-        if new_count:
-            logger.info("Startup: %d new local files detected", new_count)
-        for fpath in new_files:
-            rel = fpath[len(cache_dir_norm):].lstrip("/")
-            cloud_path = "/" + rel
-            existing = self._db.get_file(cloud_path)
-            if existing:
-                # Файл уже есть в облаке и в БД (cloud_only после
-                # «Оставить только в облаке»). Пользователь вручную
-                # скопировал файл обратно — просто отмечаем как downloaded.
-                local_md5 = _md5_file(fpath)
-                self._db.set_downloaded(cloud_path, fpath, local_md5)
-                self.table_model.update_item_status(cloud_path, "downloaded")
-                self._update_tree_status(cloud_path)
-                logger.info("Startup: restored local copy (was %s): %s",
-                            existing["status"], cloud_path)
-            else:
-                # Нет записи в БД — файл был удалён из облака через Delete,
-                # потом вручную восстановлен локально. Регистрируем как
-                # downloaded (с local_path), чтобы он отображался в интерфейсе.
-                # sync_children_from_api защитит его от удаления (local_path IS NOT NULL).
-                try:
-                    st = os.stat(fpath)
-                    size = st.st_size
-                    modified = datetime.fromtimestamp(
-                        st.st_mtime, tz=timezone.utc).isoformat()
-                    local_md5 = _md5_file(fpath)
-                except OSError:
-                    size = 0
-                    modified = ""
-                    local_md5 = ""
-                name = cloud_path.rstrip("/").split("/")[-1]
-                self._db.upsert_file(cloud_path, name, 'file',
-                                     size=size, modified=modified, md5=local_md5)
-                self._db.set_downloaded(cloud_path, fpath, last_sync_md5=local_md5)
-                self.table_model.update_item_status(cloud_path, "downloaded")
-                self._update_tree_status(cloud_path)
-                logger.info("Startup: registered local file as downloaded (no cloud copy): %s",
-                            cloud_path)
-
-        if changed or new_files:
-            QTimer.singleShot(2000, self._flush_pending_upload)
-            # Обновляем текущий вид из БД, чтобы подхватить изменённые статусы
-            QTimer.singleShot(100, lambda: self._load_folder_local(self._current_path))
+        # Вся обработка уже выполнена в фоне, нужно только обновить UI и запустить загрузку изменённых файлов
+        logger.info("Startup scan: done, refreshing UI...")
+        
+        # Обновляем текущий вид из БД, чтобы подхватить изменённые статусы
+        QTimer.singleShot(100, lambda: self._load_folder_local(self._current_path))
+        
+        # Запускаем загрузку изменённых файлов (если есть)
+        QTimer.singleShot(2000, self._flush_pending_upload)
+        
         # Проверка облака: новые файлы в полностью скачанных папках
-        # Автоскрытие — у поллинга нет явного финального колбэка,
-        # а периодические проверки (каждые 60 с) не должны мешать.
         self._show_left_busy("Проверка облака...", timeout=8000)
         QTimer.singleShot(100, self._poll_cloud)
-
-        if not stale and not changed and not new_files:
-            logger.info("Startup scan: all clean")
-            self._hide_left_busy()
 
         # Вотчер запускаем только после завершения стартового сканирования,
         # чтобы не поймать ложные файловые события во время проверки кеша
