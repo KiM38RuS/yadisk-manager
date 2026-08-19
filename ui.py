@@ -1731,6 +1731,18 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(self._pick_window_icon())
         if hasattr(self, "_tray") and self._tray:
             self._tray.setIcon(self._pick_tray_icon(force_offline=not self._online))
+        # Обновляем иконки в меню трея (после смены темы)
+        # Обновление выполняется только если не update_tray_only=False (т.е. при полной смене темы),
+        # чтобы избежать лишних обновлений при проверке подключения
+        if not update_tray_only:
+            if hasattr(self, "_tray_act_show"):
+                self._tray_act_show.setIcon(_svg_icon("home-svgrepo-com.svg", 24))
+            # Находим действие "Настройки" в меню и обновляем его иконку
+            if hasattr(self, "_tray_menu"):
+                for action in self._tray_menu.actions():
+                    if action.text() == "Настройки":
+                        action.setIcon(_svg_icon("settings-grey.svg", 24))
+                        break
 
     def _check_connectivity(self):
         """Проверка интернет-соединения через запрос к yandex.ru.

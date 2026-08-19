@@ -1,54 +1,39 @@
-# Compiled and build artifacts
-*.pyc
+```
+# Python
 __pycache__/
-*.o
-*.obj
-*.class
-*.exe
-*.dll
-*.so
-*.a
-*.out
-
-# Dependencies
-node_modules/
-venv/
-.venv/
-.env
-.env.local
-.env.*
+*.pyc
+*.pyo
+*.pyd
 
 # Logs and temp files
 *.log
 *.tmp
-*.swp
-*.swo
+
+# Environment
+.env
+.env.local
+*.env.*
 
 # Editors
 .vscode/
 .idea/
 
-# System files
-.DS_Store
-Thumbs.db
+# Dependencies
+.venv/
+venv/
+node_modules/
+
+# Build artifacts
+dist/
+build/
+target/
 
 # Coverage
-.coverage*
+.coverage
+coverage/
+htmlcov/
 
-# AI и виртуальные окружения
-.claude/
-.pi/
-
-# Логи и временные файлы
-*.txt
-LOG.txt
-Backup/**/*.txt
-
-# Скомпилированные файлы и тесты
-YaDiskManager.exe
-Test/
-Reference/
-icon-dev/
-wiki/
-tests/text_*.json
+# Testing
+.pytest_cache/
+.mypy_cache/
 ```
