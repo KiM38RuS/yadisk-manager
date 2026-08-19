@@ -466,13 +466,22 @@ class MetaFetchThread(QThread):
 
 
 class StartupScanThread(QThread):
-    """Фоновый поток для стартового сканирования: stale, changed, new files."""
-    finished = Signal(set, set, set, set)  # stale, changed, new_files, new_dirs
+    """Фоновый поток для стартового сканирования: stale, changed, new files + полная обработка."""
+    # Сигналы для разных этапов обработки
+    progress = Signal(str, int)  # message, count
+    finished = Signal()  # завершение всей обработки
+    auth_error = Signal(str)  # ошибка авторизации
+    network_error = Signal()  # нет интернета
 
-    def __init__(self, database, cache_dir, parent=None):
+    def __init__(self, api, database, cache_dir, parent=None):
         super().__init__(parent)
+        self._api = api
         self._database = database
         self._cache_dir = cache_dir
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
 
     def run(self):
         logger.info("StartupScanThread: scanning local cache...")
@@ -483,6 +492,8 @@ class StartupScanThread(QThread):
         try:
             # 1. All downloaded files from DB — check existence + md5
             for rec in self._database.get_by_status("downloaded"):
+                if self._stop_requested:
+                    return
                 try:
                     local_path = rec.get("local_path") or self._local_path(rec["cloud_path"])
                     if not os.path.exists(local_path):
@@ -504,6 +515,8 @@ class StartupScanThread(QThread):
                     known_local.add(lp.replace("\\", "/").lower())
 
             for root, _dirs, files in os.walk(self._cache_dir):
+                if self._stop_requested:
+                    return
                 for fname in files:
                     if fname.startswith(".") or fname.startswith("~") or fname.endswith("~") or fname.endswith(".tmp"):
                         continue
@@ -519,6 +532,8 @@ class StartupScanThread(QThread):
         new_dirs: set[str] = set()
         cache_dir_norm = self._cache_dir.replace("\\", "/")
         for root, dirs, _files in os.walk(self._cache_dir):
+            if self._stop_requested:
+                return
             for d in dirs:
                 if d.startswith(".") or d == "__pycache__":
                     continue
@@ -531,7 +546,110 @@ class StartupScanThread(QThread):
 
         logger.info("StartupScanThread: stale=%d, changed=%d, new=%d, new_dirs=%d",
                      len(stale), len(changed), len(new_files), len(new_dirs))
-        self.finished.emit(stale, changed, new_files, new_dirs)
+        
+        # Обрабатываем результаты в этом же потоке (без блокировки UI)
+        self._process_results(stale, changed, new_files, new_dirs)
+        
+        self.finished.emit()
+
+    def _process_results(self, stale: set, changed: set, new_files: set, new_dirs: set):
+        """Обработка результатов сканирования в фоне."""
+        # Проверяем, был ли кеш восстановлен (флаг устанавливается в MainWindow._check_cache_dir)
+        # Флаг хранится в экземпляре БД как атрибут
+        cache_was_restored = getattr(self._database, '_cache_was_restored', False)
+        
+        if cache_was_restored and stale:
+            # Кеш был удалён, пользователь выбрал "Восстановить" —
+            # ставим все файлы на перекачку
+            logger.info("Restore: queuing %d files for re-download", len(stale))
+            for cp in stale:
+                if self._stop_requested:
+                    return
+                self._database.set_status(cp, "syncing")
+        else:
+            # Stale — обновляем статус
+            for cp in stale:
+                if self._stop_requested:
+                    return
+                self._database.set_cloud_only(cp)
+                logger.info("Startup: local file missing, set cloud_only: %s", cp)
+
+        # Changed — ставим на загрузку
+        if changed:
+            logger.info("Startup: %d local files changed, will upload", len(changed))
+        for cp in changed:
+            if self._stop_requested:
+                return
+            info = self._database.get_file(cp)
+            if info and info.get("local_path") and os.path.exists(info["local_path"]):
+                # Вычисляем MD5 и обновляем БД
+                local_md5 = self._md5_file(info["local_path"])
+                self._database.set_downloaded(cp, info["local_path"], local_md5)
+            # Если файл не найден локально — пропускаем (будет обработан при старте воркеров)
+
+        # Новые папки на диске — создаём записи в БД
+        if new_dirs:
+            cache_dir_norm = self._cache_dir.replace("\\", "/")
+            dir_count = 0
+            for dpath in new_dirs:
+                if self._stop_requested:
+                    return
+                rel = dpath[len(cache_dir_norm):].lstrip("/")
+                cloud_path = "/" + rel
+                name = cloud_path.rstrip("/").split("/")[-1]
+                # Создаём все родительские папки
+                parts = cloud_path.strip("/").split("/")
+                for i in range(1, len(parts) + 1):
+                    parent = "/" + "/".join(parts[:i])
+                    if not self._database.get_file(parent):
+                        pname = parent.rstrip("/").split("/")[-1]
+                        self._database.upsert_file(parent, pname, "dir")
+                        self._database.set_status(parent, "downloaded")
+                # Отмечаем как downloaded
+                self._database.upsert_file(cloud_path, name, "dir")
+                self._database.set_downloaded(cloud_path, dpath)
+                dir_count += 1
+            logger.info("Startup: registered %d local directories", dir_count)
+
+        # New files — вычисляем cloud_path и регистрируем в БД
+        cache_dir_norm = self._cache_dir.replace("\\", "/")
+        new_count = len(new_files)
+        if new_count:
+            logger.info("Startup: %d new local files detected", new_count)
+        for fpath in new_files:
+            if self._stop_requested:
+                return
+            rel = fpath[len(cache_dir_norm):].lstrip("/")
+            cloud_path = "/" + rel
+            existing = self._database.get_file(cloud_path)
+            if existing:
+                # Файл уже есть в облаке и в БД (cloud_only после
+                # «Оставить только в облаке»). Пользователь вручную
+                # скопировал файл обратно — просто отмечаем как downloaded.
+                local_md5 = self._md5_file(fpath)
+                self._database.set_downloaded(cloud_path, fpath, local_md5)
+                logger.info("Startup: restored local copy (was %s): %s",
+                            existing["status"], cloud_path)
+            else:
+                # Нет записи в БД — файл был удалён из облака через Delete,
+                # потом вручную восстановлен локально. Регистрируем как
+                # downloaded (с local_path), чтобы он отображался в интерфейсе.
+                try:
+                    st = os.stat(fpath)
+                    size = st.st_size
+                    modified = datetime.fromtimestamp(
+                        st.st_mtime, tz=timezone.utc).isoformat()
+                    local_md5 = self._md5_file(fpath)
+                except OSError:
+                    size = 0
+                    modified = ""
+                    local_md5 = ""
+                name = cloud_path.rstrip("/").split("/")[-1]
+                self._database.upsert_file(cloud_path, name, 'file',
+                                           size=size, modified=modified, md5=local_md5)
+                self._database.set_downloaded(cloud_path, fpath, last_sync_md5=local_md5)
+                logger.info("Startup: registered local file as downloaded (no cloud copy): %s",
+                            cloud_path)
 
     def _local_path(self, cloud_path: str) -> str:
         """Compute local path from cloud path, using configured cache dir."""
