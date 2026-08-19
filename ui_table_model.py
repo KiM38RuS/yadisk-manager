@@ -5,6 +5,11 @@ RowHoverDelegate, FileTableModel, FileTableSortModel — модель и дел�
 import logging
 from datetime import datetime
 
+try:
+    import winreg
+except ImportError:  # не-Windows (например, в тестах)
+    winreg = None
+
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel
 from PySide6.QtGui import QColor, QPalette, QPainter
 from PySide6.QtWidgets import QApplication, QStyledItemDelegate, QStyle, QStyleOptionViewItem
@@ -17,6 +22,123 @@ from ui_shared import (
 )
 
 logger = logging.getLogger("ui.table_model")
+
+# ── Тип файла, как в Проводнике Windows ────────────────────
+# Источник: реестр (HKCR: .ext → ProgID → описание). Кэш, чтобы не дёргать
+# реестр на каждую ячейку. Значение None в кэше = расширение не зарегистрировано.
+
+_file_type_cache: dict[str, str | None] = {}
+
+# Запасной словарь для распространённых типов (если в реестре нет ассоциации).
+_COMMON_FILE_TYPES = {
+    # ── Изображения ──
+    "jpg": "JPEG-изображение", "jpeg": "JPEG-изображение",
+    "png": "PNG-изображение", "gif": "GIF-изображение",
+    "bmp": "Точечный рисунок BMP", "webp": "Изображение WebP",
+    "svg": "SVG-изображение", "tiff": "Изображение TIFF", "tif": "Изображение TIFF",
+    "ico": "Значок", "heic": "Изображение HEIC", "raw": "Изображение RAW",
+    "psd": "Изображение Photoshop", "avif": "Изображение AVIF",
+    # ── Документы ──
+    "pdf": "Документ PDF", "djvu": "Документ DjVu", "epub": "Электронная книга",
+    "fb2": "Электронная книга FB2", "doc": "Документ Word 97-2003", "docx": "Документ Word",
+    "rtf": "Текстовый документ RTF", "odt": "Документ OpenDocument",
+    "txt": "Текстовый документ", "md": "Файл Markdown", "log": "Документ журнала",
+    "tex": "Документ LaTeX",
+    "xls": "Лист Excel 97-2003", "xlsx": "Лист Excel", "ods": "Таблица OpenDocument",
+    "csv": "CSV-файл", "tsv": "Файл TSV",
+    "ppt": "Презентация PowerPoint 97-2003", "pptx": "Презентация PowerPoint",
+    "odp": "Презентация OpenDocument",
+    "html": "Документ HTML", "htm": "Документ HTML", "xml": "XML-документ",
+    "json": "Файл JSON", "css": "Таблица стилей CSS", "js": "Файл JavaScript",
+    # ── Архивы ──
+    "zip": "ZIP-архив", "rar": "RAR-архив", "7z": "Архив 7-Zip",
+    "gz": "GZIP-архив", "tar": "TAR-архив", "bz2": "Архив BZIP2", "xz": "Архив XZ",
+    "iso": "Образ диска ISO", "cab": "Файл CAB", "jar": "Архив Java",
+    "apk": "Пакет приложения Android", "dmg": "Образ диска",
+    # ── Аудио ──
+    "mp3": "Аудиофайл MP3", "wav": "Звук WAV", "flac": "Аудиофайл FLAC",
+    "aac": "Аудиофайл AAC", "ogg": "Аудиофайл OGG", "opus": "Аудиофайл Opus",
+    "m4a": "Аудиофайл M4A", "wma": "Аудиофайл Windows Media", "mid": "MIDI-файл",
+    "midi": "MIDI-файл", "amr": "Аудиофайл AMR", "aiff": "Звук AIFF",
+    # ── Видео ──
+    "mp4": "Видеофайл MP4", "mkv": "Видеофайл MKV", "avi": "Видеофайл AVI",
+    "mov": "Видеофайл QuickTime", "wmv": "Видеофайл Windows Media",
+    "webm": "Видеофайл WebM", "flv": "Видеофайл FLV", "m4v": "Видеофайл M4V",
+    "mpg": "Видеофайл MPEG", "mpeg": "Видеофайл MPEG", "3gp": "Видеофайл 3GP",
+    "ts": "Видеофайл MPEG-2 TS", "mts": "Видеофайл AVCHD", "vob": "Видеофайл VOB",
+    # ── Исполняемые / системные ──
+    "exe": "Приложение", "msi": "Пакет установщика Windows", "bat": "Пакетный файл Windows",
+    "cmd": "Командный файл Windows", "dll": "Расширение приложения", "sys": "Системный файл",
+    "lnk": "Ярлык", "inf": "Сведения об установке", "reg": "Параметры реестра",
+    "ps1": "Скрипт Windows PowerShell", "msix": "Пакет приложения MSIX",
+    "com": "Приложение MS-DOS", "scr": "Экранная заставка", "ocx": "Элемент управления ActiveX",
+    # ── Код / данные ──
+    "py": "Файл Python", "pyw": "Файл Python", "java": "Файл Java", "c": "Исходный код C",
+    "h": "Заголовочный файл C", "cpp": "Исходный код C++", "hpp": "Заголовочный файл C++",
+    "cs": "Исходный код C#", "go": "Файл Go", "rs": "Файл Rust", "php": "Файл PHP",
+    "rb": "Файл Ruby", "swift": "Файл Swift", "kt": "Файл Kotlin", "sql": "Файл SQL",
+    "sh": "Скрипт оболочки bash", "pl": "Скрипт Perl", "lua": "Файл Lua",
+    "yml": "Файл YAML", "yaml": "Файл YAML", "toml": "Файл TOML", "ini": "Параметры конфигурации",
+    "cfg": "Параметры конфигурации", "conf": "Параметры конфигурации", "env": "Файл ENV",
+    # ── Шрифты / прочее ──
+    "ttf": "Шрифт TrueType", "otf": "Шрифт OpenType", "fon": "Шрифт",
+    "woff": "Веб-шрифт WOFF", "woff2": "Веб-шрифт WOFF2", "eot": "Встроенный шрифт OpenType",
+    "torrent": "Файл торрента", "pdb": "Файл PDB", "srt": "Субтитры SRT", "ass": "Субтитры ASS",
+    "vtt": "Субтитры WebVTT", "dat": "Файл данных", "bin": "Двоичный файл",
+    "bak": "Резервная копия", "tmp": "Временный файл", "dwg": "Чертёж AutoCAD",
+    "stl": "Файл STL", "fbx": "Сцена FBX", "obj": "Объект Wavefront", "3ds": "Сцена 3D Studio",
+}
+
+
+def _registry_type_desc(ext: str) -> str | None:
+    r"""Описание типа из реестра Windows — то же, что показывает Проводник.
+
+    Путь: HKCR\.<ext> → ProgID → HKCR\<ProgID> → (по умолчанию) описание.
+    Результат кэшируется по расширению.
+    """
+    if winreg is None:
+        return None
+    key = "." + ext
+    if key in _file_type_cache:
+        return _file_type_cache[key]
+    desc: str | None = None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, key) as k:
+            prog_id = winreg.QueryValue(k, "")  # значение по умолчанию
+        if prog_id:
+            with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, prog_id) as k:
+                desc = winreg.QueryValue(k, "")
+    except OSError:
+        desc = None
+    _file_type_cache[key] = desc
+    return desc
+
+
+def _file_type(item: dict) -> str:
+    """Тип элемента для колонки «Тип» — как в Проводнике Windows.
+
+    Папки → «Папка с файлами»; файлы → зарегистрированное в реестре описание
+    (например «JPEG-изображение»); неизвестные расширения → «Файл XYZ».
+    """
+    if item.get("is_parent_nav"):
+        return ""
+    if item.get("is_dir"):
+        return "Папка с файлами"
+    name = item.get("name", "")
+    base, dot, ext = name.rpartition(".")
+    if dot and base:
+        ext = ext.lower()
+    else:
+        ext = ""  # без расширения или точечное имя (.gitignore)
+    # Сначала русский словарь (совпадает с русским Проводником),
+    # потом реестр (для «длинного хвоста» расширений), потом «Файл XYZ».
+    desc = _COMMON_FILE_TYPES.get(ext) if ext else None
+    if desc:
+        return desc
+    desc = _registry_type_desc(ext) if ext else None
+    if desc:
+        return desc
+    return f"Файл {ext.upper()}" if ext else "Файл"
 
 
 class RowHoverDelegate(QStyledItemDelegate):
@@ -98,7 +220,7 @@ class RowHoverDelegate(QStyledItemDelegate):
 
 
 class FileTableModel(QAbstractTableModel):
-    COLUMNS = ["Статус", "Имя", "Размер", "Изменён", "Расположение"]
+    COLUMNS = ["Статус", "Имя", "Размер", "Тип", "Изменён", "Расположение"]
 
     def __init__(self, database: db.Database, parent=None):
         super().__init__(parent)
@@ -202,8 +324,8 @@ class FileTableModel(QAbstractTableModel):
                 self._items[i]["status"] = new_status
                 self._items[i]["size"] = new_size
                 self._items[i]["modified"] = new_modified
-                # Оповестить все столбцы (0 = статус, 3 = изменён)
-                self.dataChanged.emit(self.index(i, 0), self.index(i, 3), [Qt.DisplayRole])
+                # Оповестить все столбцы (0 = статус … 4 = изменён)
+                self.dataChanged.emit(self.index(i, 0), self.index(i, 4), [Qt.DisplayRole])
                 break
 
     def update_item_status(self, cloud_path: str, new_status: str):
@@ -241,7 +363,7 @@ class FileTableModel(QAbstractTableModel):
             min_r = min(changed_rows)
             max_r = max(changed_rows)
             self.dataChanged.emit(
-                self.index(min_r, 0), self.index(max_r, 3), [Qt.DisplayRole])
+                self.index(min_r, 0), self.index(max_r, 4), [Qt.DisplayRole])
 
     def refresh_animated_icons(self):
         """Обновить иконки строк с анимированным статусом (syncing/unknown).
@@ -282,6 +404,8 @@ class FileTableModel(QAbstractTableModel):
             elif col == 2:
                 return _human_size(item["size"]) if not item["is_dir"] else ""
             elif col == 3:
+                return _file_type(item)
+            elif col == 4:
                 mod = item["modified"]
                 if mod:
                     try:
@@ -290,7 +414,7 @@ class FileTableModel(QAbstractTableModel):
                     except Exception:
                         return mod[:19].replace("T", " ")
                 return ""
-            elif col == 4:
+            elif col == 5:
                 return item.get("parent_path", "")
         if role == Qt.DecorationRole and col == 0:
             s = item["status"]
@@ -363,6 +487,13 @@ class FileTableModel(QAbstractTableModel):
 
     def mimeTypes(self):
         return ['application/x-yadisk-cloud-paths']
+
+    def supportedDropActions(self):
+        return Qt.CopyAction | Qt.MoveAction
+
+    def canDropMimeData(self, data, action, row, column, parent):
+        """Разрешить drop: view принимает событие и рисует drop-индикатор."""
+        return data is not None and data.hasFormat('application/x-yadisk-cloud-paths')
 
     def mimeData(self, indexes):
         import json
@@ -455,7 +586,9 @@ class FileTableSortModel(QSortFilterProxyModel):
             return l_name < r_name
         elif col == 2:  # Размер
             return l_item["size"] < r_item["size"]
-        elif col == 3:  # Изменён
+        elif col == 3:  # Тип
+            return _file_type(l_item) < _file_type(r_item)
+        elif col == 4:  # Изменён
             return (l_item["modified"] or "") < (r_item["modified"] or "")
         return super().lessThan(left, right)
 
@@ -464,6 +597,6 @@ class FileTableSortModel(QSortFilterProxyModel):
 
         При повторном клике Qt сама переключает Asc↔Desc — не мешаем.
         """
-        if column == 3 and self.sortColumn() != 3 and order == Qt.AscendingOrder:
+        if column == 4 and self.sortColumn() != 4 and order == Qt.AscendingOrder:
             order = Qt.DescendingOrder
         super().sort(column, order)

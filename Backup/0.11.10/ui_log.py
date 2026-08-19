@@ -58,10 +58,18 @@ class LogWindow(QWidget):
     Если пользователь прокрутил вверх — авто-прокрутка отключается.
     """
     def __init__(self, signal: LogSignal, parent=None):
-        super().__init__(parent)
+        # БЕЗ Qt-родителя: parented-окно на Windows становится owned-окном
+        # (owner = главное окно), физически не может уйти под него по z-order
+        # и не получает клавиатурный фокус при клике. parent храним только
+        # как ссылку на MainWindow (Shift+F5, статус-бар).
+        super().__init__(None)
+        self._main = parent
         self.setWindowTitle("Лог YaDisk Manager")
-        # Dialog вместо Tool — Qt.Tool блокирует клавиатурные события на Windows
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
+        # Qt.Tool: нет значка на панели задач и в списке Alt+Tab (WS_EX_TOOLWINDOW).
+        # Без родителя остаётся обычным активируемым окном — клавиатура работает.
+        # Z-order ведёт MainWindow._sync_log_zorder: лог — спутник Менеджера,
+        # при его активации поднимается сразу за ним (а не поверх).
+        self.setWindowFlags(Qt.Tool | Qt.WindowCloseButtonHint)
         self.resize(720, 400)
         self._auto_scroll = True
 
@@ -143,10 +151,10 @@ class LogWindow(QWidget):
         self._copy_btn.move(x, y)
 
     def _parent_restart(self):
-        """Перезапуск через родительское окно."""
-        parent = self.parent()
-        if parent and hasattr(parent, "_restart_app"):
-            parent._restart_app()
+        """Перезапуск через главное окно."""
+        main = self._main
+        if main and hasattr(main, "_restart_app"):
+            main._restart_app()
 
     def eventFilter(self, obj, event):
         """Перехват Ctrl+C на уровне QApplication."""
@@ -250,12 +258,12 @@ class LogWindow(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        parent = self.parent()
-        if parent and hasattr(parent, '_update_log_label_style'):
-            parent._update_log_label_style()
+        main = self._main
+        if main and hasattr(main, '_update_log_label_style'):
+            main._update_log_label_style()
 
     def hideEvent(self, event):
         super().hideEvent(event)
-        parent = self.parent()
-        if parent and hasattr(parent, '_update_log_label_style'):
-            parent._update_log_label_style()
+        main = self._main
+        if main and hasattr(main, '_update_log_label_style'):
+            main._update_log_label_style()

@@ -267,7 +267,9 @@ class UpdateDialog(QDialog):
         self._thread = None
         self._download_path = None
         self.setWindowTitle("Обновление YaDisk Manager")
-        self.setModal(True)
+        # WindowModal (не ApplicationModal): блокируется только окно
+        # Менеджера; окно лога остаётся интерактивным во время обновления.
+        self.setWindowModality(Qt.WindowModal)
         self.setFixedWidth(440)
 
         layout = QVBoxLayout(self)

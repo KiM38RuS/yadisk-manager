@@ -276,6 +276,13 @@ class FolderTreeModel(QAbstractItemModel):
     def mimeTypes(self):
         return ['application/x-yadisk-cloud-paths']
 
+    def supportedDropActions(self):
+        return Qt.CopyAction | Qt.MoveAction
+
+    def canDropMimeData(self, data, action, row, column, parent):
+        """Разрешить drop: view принимает событие и рисует drop-индикатор."""
+        return data is not None and data.hasFormat('application/x-yadisk-cloud-paths')
+
     def mimeData(self, indexes):
         import json
         from PySide6.QtCore import QMimeData

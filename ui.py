@@ -23,7 +23,7 @@ from PySide6.QtGui import (
     QAction, QIcon, QFont, QColor, QPalette, QBrush,
     QFontDatabase, QShortcut, QKeySequence, QPixmap,
     QPainter, QLinearGradient, QMovie, QGuiApplication,
-    QDesktopServices, QDrag,
+    QDesktopServices, QDrag, QCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -127,6 +127,9 @@ class MainWindow(QMainWindow):
         # Drag-and-drop: отслеживание начала перетаскивания
         self._drag_start_pos: QPoint | None = None
         self._drag_start_view: str | None = None  # 'tree' or 'table'
+        self._pending_drag_button: int | None = None  # LMB/RMB для старта drag
+        self._drag_mouse_button: int | None = None  # кнопка активного drag
+        self._pending_internal_drop: tuple | None = None  # (paths, target) для RMB-drag
         self._internal_drop_op_id: int | None = None  # ID pending_op для внутреннего DnD
         self._delete_op_id: int | None = None  # ID pending_op для удаления
 
@@ -206,6 +209,7 @@ class MainWindow(QMainWindow):
         logging.getLogger().addHandler(self._log_handler)
         self._log_window = LogWindow(self._log_signal, self)
         self._log_window.setVisible(False)
+        self._log_visible_before_minimize = False
         self._log_window.restore_position()
 
         self._init_ui()
@@ -220,11 +224,15 @@ class MainWindow(QMainWindow):
         # чтобы вотчер не успел поймать файловые события во время
         # стартовой проверки и не начал ложную выгрузку всех файлов в облако.
 
-        # Авто-показ окна лога при запуске (если включено в настройках)
-        if db.get_show_log_on_startup():
+        # Авто-показ окна лога при запуске (если включено в настройках).
+        # НЕ вызываем _sync_log_zorder(): Менеджер ещё не показан (show()
+        # вызывается в main.py после __init__) и не активен — иначе лог
+        # сразу ушёл бы на дно z-order (ветка деактивации) и остался
+        # невидимым. Менеджер показывается позже и ложится поверх лога.
+        # В silent-режиме (автозапуск) окно лога не показываем — только
+        # по клику «Показать лог» / пункту трея.
+        if db.get_show_log_on_startup() and "--silent" not in sys.argv:
             self._log_window.setVisible(True)
-            self._log_window.raise_()
-            self._log_window.activateWindow()
 
         # Стартовое сканирование локального кеша + облака
         QTimer.singleShot(500, self._startup_scan)
@@ -307,7 +315,8 @@ class MainWindow(QMainWindow):
 
         Возвращает True, если токен получен, False если пользователь отменил.
         """
-        auth = AuthDialog()
+        auth = AuthDialog(self)
+        auth.setWindowModality(Qt.WindowModal)
         if auth.exec() != QDialog.Accepted:
             return False
 
@@ -330,6 +339,7 @@ class MainWindow(QMainWindow):
             "Хотите ввести новый токен?",
             parent=self,
         )
+        msg.setWindowModality(Qt.WindowModal)
         msg.addButton("Да", QMessageBox.YesRole)
         msg.addButton("Нет", QMessageBox.NoRole)
         reply = msg.exec()
@@ -677,14 +687,16 @@ class MainWindow(QMainWindow):
         # Ширина столбцов по умолчанию
         self.table_view.setColumnWidth(0, 28)  # Статус (иконка) — минимальная ширина
         self.table_view.setColumnWidth(1, 300)  # Имя
-        self.table_view.setColumnWidth(3, 100)  # Изменён
-        self.table_view.setColumnWidth(4, 180)  # Расположение
+        self.table_view.setColumnWidth(4, 100)  # Изменён
+        self.table_view.setColumnWidth(5, 180)  # Расположение
         # Колонка «Расположение» видна только в результатах поиска
-        self.table_view.setColumnHidden(4, True)
+        self.table_view.setColumnHidden(5, True)
         self.table_view.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.Fixed)
         self.table_view.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeToContents)
+        self.table_view.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeToContents)
         self.table_view.doubleClicked.connect(self._on_file_double_clicked)
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(
@@ -752,6 +764,13 @@ class MainWindow(QMainWindow):
         self._status_spinner = _WaveSpinner()
         self._status_spinner.hide()
         self.statusBar().insertWidget(0, self._status_spinner)
+
+        # Счётчик множественного выделения («Выбрано: N») — слева в статус-баре,
+        # сразу после спиннера (перенесено из контекстного меню). Виден только
+        # когда выделено несколько элементов.
+        self._status_selection_label = QLabel("")
+        self._status_selection_label.hide()
+        self.statusBar().insertWidget(1, self._status_selection_label)
 
         self._status_label = QLabel("")
         self.statusBar().addWidget(self._status_label, 1)
@@ -1489,6 +1508,7 @@ class MainWindow(QMainWindow):
         self.table_view.clearSelection()
         self._selection_updating = False
         self._update_toolbar_buttons()
+        self._update_selection_counter()
 
     def _on_table_selection_changed(self, selected, deselected):
         """При изменении выделения в таблице → снять выделение в дереве."""
@@ -1498,6 +1518,32 @@ class MainWindow(QMainWindow):
         self.tree_view.clearSelection()
         self._selection_updating = False
         self._update_toolbar_buttons()
+        self._update_selection_counter()
+
+    def _update_selection_counter(self):
+        """Счётчик «Выбрано: N» в статус-баре — виден при множественном выделении.
+
+        Вызывается при каждом изменении выделения (таблица + дерево).
+        """
+        n = len(self.table_view.selectionModel().selectedRows(0))
+        n += len(self.tree_view.selectionModel().selectedRows(0))
+        if n >= 2:
+            self._status_selection_label.setText(
+                f"Выбрано: {n} "
+                f"{self._plural_ru(n, 'элемент', 'элемента', 'элементов')}")
+            self._status_selection_label.show()
+        else:
+            self._status_selection_label.hide()
+
+    @staticmethod
+    def _plural_ru(n: int, one: str, few: str, many: str) -> str:
+        """Русское склонение: 1 элемент, 2 элемента, 5 элементов."""
+        n10, n100 = n % 10, n % 100
+        if n10 == 1 and n100 != 11:
+            return one
+        if 2 <= n10 <= 4 and not 12 <= n100 <= 14:
+            return few
+        return many
 
     def _update_toolbar_buttons(self):
         """Включить/выключить кнопки в зависимости от выделения."""
@@ -1654,8 +1700,49 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_tray") and self._tray:
             self._tray.setIcon(self._pick_tray_icon())
 
+    def _sync_log_zorder(self):
+        """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
+        панели задач, клик по окну) лог поднимается на передний план сразу
+        за Менеджером. При потере фокуса лог НЕ опускается и НЕ прячется:
+        переключение в другое окно не должно делать лог невидимым (раньше
+        lw.lower() уводил его на дно z-order, под окно Менеджера); активное
+        чужое окно накроет лог само, если окна перекрываются. Лог прячется
+        только вместе со сворачиванием Менеджера (_on_manager_state_change).
+        Клик по логу поднимает его над Менеджером — «всегда поверх» нет."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None or not lw.isVisible() or self.isMinimized():
+            return
+        if self.isActiveWindow():
+            lw.raise_()
+            self.raise_()
+            # Подстраховка: raise() меняет z-order без смены фокуса, но если
+            # Windows всё же отдал фокус логу — вернуть его Менеджеру.
+            if QApplication.activeWindow() is lw:
+                QTimer.singleShot(0, self.activateWindow)
+
+    def _on_manager_state_change(self):
+        """При сворачивании Менеджера прятать окно лога (у него нет значка
+        на панели задач — вернуть его можно только вместе с Менеджером)."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None:
+            return
+        if self.isMinimized():
+            if lw.isVisible():
+                self._log_visible_before_minimize = True
+                lw.hide()
+        else:
+            if getattr(self, '_log_visible_before_minimize', False):
+                self._log_visible_before_minimize = False
+                lw.show()
+                lw.raise_()
+                self.raise_()
+
     def changeEvent(self, event):
-        if event.type() == QEvent.Type.PaletteChange:
+        if event.type() == QEvent.Type.ActivationChange:
+            self._sync_log_zorder()
+        elif event.type() == QEvent.Type.WindowStateChange:
+            self._on_manager_state_change()
+        elif event.type() == QEvent.Type.PaletteChange:
             # НЕ вызываем _update_app_icons() на каждый PaletteChange:
             # Qt шлёт PaletteChange при открытии/закрытии КАЖДОГО модального
             # диалога, и пересоздание иконок окна/трея в обработчике события
@@ -1924,6 +2011,7 @@ class MainWindow(QMainWindow):
     def _logout_and_reauth(self):
         """Выйти из аккаунта: очистить токен и показать диалог авторизации."""
         msg = QMessageBox(self)
+        msg.setWindowModality(Qt.WindowModal)
         msg.setWindowTitle("Выйти из аккаунта")
         msg.setIcon(QMessageBox.Question)
         msg.setText(
@@ -1943,7 +2031,8 @@ class MainWindow(QMainWindow):
         token = db.get_token()
         if not token:
             # Показываем диалог авторизации
-            auth = AuthDialog()
+            auth = AuthDialog(self)
+            auth.setWindowModality(Qt.WindowModal)
             if auth.exec() != AuthDialog.Accepted:
                 # Пользователь отменил — выходим
                 self._menu_quit()
@@ -2114,6 +2203,7 @@ class MainWindow(QMainWindow):
 
         # Показываем диалог
         msg = QMessageBox(self)
+        msg.setWindowModality(Qt.WindowModal)
         msg.setWindowTitle("Локальный кеш не найден")
         msg.setText(
             f"Папка локального кеша не существует:\n{cache_dir}\n\n"
@@ -2262,6 +2352,39 @@ class MainWindow(QMainWindow):
         # Обновляем отображение из БД
         QTimer.singleShot(300, lambda: self._navigate_to_folder(self._current_path))
 
+    def _finish_drag(self, drag, mime_paths: list[str]):
+        """Общий хвост QDrag: exec, затем для RMB — меню «Копировать/Переместить».
+
+        Пока drag живёт, eventFilter принимает Drop: для LMB — сразу обрабатывает
+        (Shift = перемещение), для RMB — откладывает в _pending_internal_drop,
+        а выбор действия делает пользователь в этом меню.
+        """
+        btn = getattr(self, '_pending_drag_button', Qt.LeftButton)
+        self._drag_mouse_button = btn
+        try:
+            action = drag.exec(Qt.CopyAction | Qt.MoveAction)
+        finally:
+            self._drag_mouse_button = None
+        if btn != Qt.RightButton or action == Qt.IgnoreAction:
+            return
+        # RMB-drag: после отпускания — меню выбора действия
+        pending = getattr(self, '_pending_internal_drop', None)
+        self._pending_internal_drop = None
+        if not pending:
+            return
+        paths, target = pending
+        menu = QMenu(self)
+        act_copy = menu.addAction("Копировать")
+        act_copy.setIcon(_svg_icon("Copy.svg", 24))
+        act_move = menu.addAction("Переместить")
+        act_move.setIcon(_svg_icon("scissors-3.svg", 24))
+        chosen = menu.exec(QCursor.pos())
+        if chosen is None:
+            # Отмена меню (Esc / клик мимо) — операция не запускается
+            return
+        is_move = (chosen == act_move)
+        self._handle_internal_drop(paths, target, is_move)
+
     def _start_drag_from_tree(self):
         """Инициировать QDrag из дерева папок."""
         sel = self.tree_view.selectionModel()
@@ -2288,7 +2411,7 @@ class MainWindow(QMainWindow):
         p.end()
         drag.setPixmap(pix)
         drag.setHotSpot(QPoint(60, 12))
-        drag.exec(Qt.CopyAction | Qt.MoveAction)
+        self._finish_drag(drag, [])
 
     def _start_drag_from_table(self):
         """Инициировать QDrag из таблицы файлов."""
@@ -2316,7 +2439,7 @@ class MainWindow(QMainWindow):
         p.end()
         drag.setPixmap(pix)
         drag.setHotSpot(QPoint(60, 12))
-        drag.exec(Qt.CopyAction | Qt.MoveAction)
+        self._finish_drag(drag, [])
 
     # ── Watcher ───────────────────────────────────────────
 
@@ -2718,6 +2841,7 @@ class MainWindow(QMainWindow):
             cloud_label = f"Облачная версия ({cloud_size_str}): {cloud_time_str}"
 
         msg = QMessageBox(self)
+        msg.setWindowModality(Qt.WindowModal)
         msg.setWindowTitle("Конфликт")
         msg.setIcon(QMessageBox.Question)
         msg.setText(
@@ -3179,6 +3303,7 @@ class MainWindow(QMainWindow):
 
         if existing_names:
             msg = QMessageBox(self)
+            msg.setWindowModality(Qt.WindowModal)
             msg.setWindowTitle("Конфликт имён")
             msg.setIcon(QMessageBox.Question)
             msg.setText(
@@ -3252,7 +3377,8 @@ class MainWindow(QMainWindow):
         _start = time.monotonic()
         try:
             # ── MouseButtonPress: сброс выделения в пустом месте + трекинг drag ─
-            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            if (event.type() == QEvent.MouseButtonPress
+                    and event.button() in (Qt.LeftButton, Qt.RightButton)):
                 obj_is_tree = (hasattr(self, 'tree_view') and self.tree_view is not None
                                and obj is self.tree_view.viewport())
                 obj_is_table = (hasattr(self, 'table_view') and self.table_view is not None
@@ -3287,18 +3413,23 @@ class MainWindow(QMainWindow):
                         self._selection_updating = False
                         self._update_toolbar_buttons()
 
-            # ── MouseMove: DnD старт при превышении threshold ─────────────────
+            # ── MouseMove: DnD старт при превышении threshold (LMB или RMB) ────
             if (event.type() == QEvent.MouseMove
-                    and event.buttons() & Qt.LeftButton
+                    and event.buttons() & (Qt.LeftButton | Qt.RightButton)
                     and self._drag_start_pos is not None):
                 # Проверяем дистанцию
                 delta = (event.pos() - self._drag_start_pos).manhattanLength()
                 if delta >= QApplication.startDragDistance():
+                    # Какая кнопка тащит (для RMB после отпускания — меню Copy/Move)
+                    self._pending_drag_button = (
+                        Qt.LeftButton if event.buttons() & Qt.LeftButton
+                        else Qt.RightButton)
                     # Запускаем QDrag
                     if self._drag_start_view == 'tree':
                         self._start_drag_from_tree()
                     elif self._drag_start_view == 'table':
                         self._start_drag_from_table()
+                    self._pending_drag_button = None
                     self._drag_start_pos = None
                     self._drag_start_view = None
                     return True
@@ -3330,11 +3461,12 @@ class MainWindow(QMainWindow):
                 mime = event.mimeData()
                 if not mime:
                     return False
-                # Внутренний DnD (из дерева/таблицы)
+                # Внутренний DnD (из дерева/таблицы): НЕ съедаем событие —
+                # возвращаем False, чтобы сам QTreeView/QTableView обработал его
+                # (canDropMimeData в модели) и нарисовал drop-индикатор на папке
                 if mime.hasFormat(_INTERNAL_MIME):
-                    event.acceptProposedAction()
-                    return True
-                # Внешний DnD (из Проводника)
+                    return False
+                # Внешний DnD (из Проводника) — view его не примет, accept здесь
                 if mime.hasUrls() and any(u.isLocalFile() for u in mime.urls()):
                     event.acceptProposedAction()
                     return True
@@ -3363,8 +3495,22 @@ class MainWindow(QMainWindow):
                                 target_path = item.cloud_path
                     elif obj is self.table_view.viewport():
                         target_path = self._current_path
+                        # Как в Проводнике: drop на строку-папку нацеливается
+                        # на эту папку (а не на текущую)
+                        idx = self.table_view.indexAt(event.pos())
+                        if idx.isValid():
+                            item = self._get_item(idx)
+                            if item and item.get("is_dir") \
+                                    and not item.get("is_parent_nav"):
+                                target_path = item["cloud_path"]
                     else:
                         return False
+                    # RMB-drag: не обрабатываем drop сразу — откладываем,
+                    # действие выберет пользователь в меню после отпускания
+                    if getattr(self, '_drag_mouse_button', None) == Qt.RightButton:
+                        self._pending_internal_drop = (paths, target_path)
+                        event.acceptProposedAction()
+                        return True
                     mods = event.keyboardModifiers()
                     is_move = bool(mods & Qt.ShiftModifier)
                     QTimer.singleShot(0, lambda p=paths, d=target_path, m=is_move:
@@ -4035,6 +4181,7 @@ class MainWindow(QMainWindow):
                     "Замена удалит их в облаке."
                 )
             msg = QMessageBox(self)
+            msg.setWindowModality(Qt.WindowModal)
             msg.setWindowTitle("Конфликт")
             msg.setIcon(QMessageBox.Question)
             msg.setText(
@@ -4156,6 +4303,7 @@ class MainWindow(QMainWindow):
 
         # Диалог подтверждения
         msg = QMessageBox(self)
+        msg.setWindowModality(Qt.WindowModal)
         msg.setWindowTitle("Подтверждение")
         msg.setIcon(QMessageBox.Question)
         msg.setText(
@@ -4626,7 +4774,7 @@ class MainWindow(QMainWindow):
 
     def _update_location_column(self):
         """Колонка «Расположение» видна только в результатах поиска."""
-        self.table_view.setColumnHidden(4, not self._search_mode)
+        self.table_view.setColumnHidden(5, not self._search_mode)
 
     def _focus_search(self):
         """Перевести фокус в строку поиска (Ctrl+F)."""
@@ -4671,6 +4819,10 @@ class MainWindow(QMainWindow):
 
     def _show_settings(self):
         dlg = SettingsDialog(self, on_cache_changed=self._on_cache_changed)
+        # WindowModal вместо дефолтного ApplicationModal (его даёт exec()):
+        # блокируется только окно Менеджера, а окно лога (без Qt-родителя)
+        # остаётся видимым и интерактивным, пока открыты Настройки.
+        dlg.setWindowModality(Qt.WindowModal)
         dlg.exec()
 
     def _on_cache_changed(self, old_dir: str, new_dir: str):
@@ -4754,9 +4906,21 @@ class MainWindow(QMainWindow):
             return
 
         item = self._get_item(index)
-        # Выделяем только этот элемент
-        self.table_view.selectionModel().select(
-            index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        # Стандартное поведение Windows: ПКМ по невыделенному элементу выделяет его,
+        # ПКМ по уже выделенному (в т.ч. в составе множественного выделения)
+        # сохраняет выделение как есть — без этого ПКМ схлопывал мультивыделение
+        # до одного элемента под курсором
+        if not self.table_view.selectionModel().isSelected(index):
+            self.table_view.selectionModel().select(
+                index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+
+        # Множественное выделение — общее меню (как в Проводнике): только операции,
+        # работающие со всем набором; single-операции (ссылка, переименовать, ZIP…)
+        # показываются только для одиночного выделения
+        if len(self.table_view.selectionModel().selectedRows(0)) > 1:
+            self._build_multi_context_menu(menu)
+            menu.exec(self.table_view.viewport().mapToGlobal(pos))
+            return
 
         is_dir = item.get("is_dir", False)
         cloud_path = item["cloud_path"]
@@ -4837,6 +5001,48 @@ class MainWindow(QMainWindow):
 
         menu.exec(self.table_view.viewport().mapToGlobal(pos))
 
+    def _build_multi_context_menu(self, menu: QMenu):
+        """Меню для множественного выделения в таблице.
+
+        Показывается одно и то же меню для любого набора (файлы / папки / смешанное),
+        как в Проводнике Windows: только операции, применимые ко всему выделению.
+        """
+        items = []
+        for idx in self.table_view.selectionModel().selectedRows(0):
+            it = self._get_item(idx)
+            if it and not it.get("is_parent_nav"):
+                items.append(it)
+        if not items:
+            return
+
+        # Есть ли среди выделенных ещё не скачанные / уже оставленные в облаке
+        any_not_downloaded = any(
+            it.get("status") != "downloaded" for it in items)
+        any_not_cloud_only = any(
+            it.get("status") != "cloud_only" for it in items)
+
+        act = menu.addAction("Сохранить на компьютере", self._save_to_computer)
+        act.setIcon(_svg_icon("loaded.svg", 24))
+        act.setEnabled(any_not_downloaded)
+        act = menu.addAction("Оставить только в облаке", self._leave_only_in_cloud)
+        act.setIcon(_svg_icon("cloud.svg", 24))
+        act.setEnabled(any_not_cloud_only)
+
+        menu.addSeparator()
+
+        act = menu.addAction("Вырезать", self._cut_to_buffer)
+        act.setIcon(_svg_icon("scissors-3.svg", 24))
+        act = menu.addAction("Копировать", self._copy_to_buffer)
+        act.setIcon(_svg_icon("Copy.svg", 24))
+        if self._clipboard_buffer:
+            act = menu.addAction("Вставить", self._paste_from_buffer)
+            act.setIcon(_svg_icon("paste.svg", 24))
+
+        menu.addSeparator()
+
+        act = menu.addAction("Удалить", self._delete_selected)
+        act.setIcon(_svg_icon("trash.svg", 24))
+
     def _on_tree_context_menu(self, pos):
         """Контекстное меню для дерева папок."""
         index = self.tree_view.indexAt(pos)
@@ -4845,9 +5051,11 @@ class MainWindow(QMainWindow):
         cloud_path = index.data(Qt.UserRole)
         if not cloud_path:
             return
-        # Выделяем только эту папку
-        self.tree_view.selectionModel().select(
-            index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        # Стандартное поведение Windows: ПКМ по невыделенной папке выделяет её,
+        # по выделенной — сохраняет текущее выделение
+        if not self.tree_view.selectionModel().isSelected(index):
+            self.tree_view.selectionModel().select(
+                index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
         menu = QMenu(self)
 
         # 1. Открыть — жирным шрифтом
