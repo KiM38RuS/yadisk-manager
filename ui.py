@@ -23,7 +23,7 @@ from PySide6.QtGui import (
     QAction, QIcon, QFont, QColor, QPalette, QBrush,
     QFontDatabase, QShortcut, QKeySequence, QPixmap,
     QPainter, QLinearGradient, QMovie, QGuiApplication,
-    QDesktopServices, QDrag, QCursor,
+    QDesktopServices, QDrag, QCursor, QImage, qRgba,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -197,6 +197,12 @@ class MainWindow(QMainWindow):
         self._search_history_timer.setSingleShot(True)
         self._search_history_timer.timeout.connect(self._save_search_history)
         self._search_history_ms = 2000
+
+        # ── проверка интернет-соединения ──────────────────
+        self._online = True  # считаем что онлайн до первой проверки
+        self._connectivity_timer = QTimer(self)
+        self._connectivity_timer.timeout.connect(self._check_connectivity)
+        self._connectivity_timer.start(30000)  # проверять каждые 30 секунд
 
         # Предотвращение рекурсии при перекрёстном снятии выделения
         self._selection_updating = False
@@ -1682,23 +1688,68 @@ class MainWindow(QMainWindow):
         return QIcon()
 
     @classmethod
-    def _pick_tray_icon(cls) -> QIcon:
-        """Иконка для системного трея — 16px с учётом темы (светлая/тёмная)."""
+    def _pick_tray_icon(cls, force_offline: bool = False) -> QIcon:
+        """Иконка для системного трея — 16px с учётом темы (светлая/тёмная).
+        Если force_offline=True — возвращает полупрозрачную версию иконки."""
         ico = "icon-light-16.ico" if cls._is_windows_dark_mode() else "icon-16.ico"
         path = os.path.join(os.path.dirname(__file__), "Assets", ico)
-        if os.path.isfile(path):
-            return QIcon(path)
+        base_path = path if os.path.isfile(path) else None
+        
         # fallback на icon-main.ico если 16px нет
-        fallback = os.path.join(os.path.dirname(__file__), "icon-main.ico")
-        if os.path.isfile(fallback):
-            return QIcon(fallback)
-        return QIcon()
+        if base_path is None:
+            fallback = os.path.join(os.path.dirname(__file__), "icon-main.ico")
+            if os.path.isfile(fallback):
+                base_path = fallback
+        
+        if base_path is None:
+            return QIcon()
+        
+        if not force_offline:
+            return QIcon(base_path)
+        
+        # Создаём полупрозрачную версию иконки
+        pixmap = QPixmap(base_path)
+        if pixmap.isNull():
+            return QIcon(base_path)
+        
+        # Конвертируем в QImage для манипуляции с альфа-каналом
+        image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
+        
+        # Делаем изображение полупрозрачным (альфа-канал ~50%)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixel(x, y)
+                a = qRgba(pixel >> 24 & 0xFF, pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF)
+                alpha = (pixel & 0xFF)  # текущий альфа-канал
+                new_alpha = int(alpha * 0.5)  # уменьшаем до 50%
+                image.setPixel(x, y, qRgba(pixel >> 24 & 0xFF, pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, new_alpha))
+        
+        return QIcon(QPixmap.fromImage(image))
 
     def _update_app_icons(self, update_tray_only: bool = False):
         if not update_tray_only:
             self.setWindowIcon(self._pick_window_icon())
         if hasattr(self, "_tray") and self._tray:
-            self._tray.setIcon(self._pick_tray_icon())
+            self._tray.setIcon(self._pick_tray_icon(force_offline=not self._online))
+
+    def _check_connectivity(self):
+        """Проверка интернет-соединения через запрос к yandex.ru.
+        При изменении статуса обновляет иконку в трее."""
+        import socket
+        
+        old_online = self._online
+        try:
+            # Пробуем подключиться к yandex.ru:443 (HTTPS)
+            sock = socket.create_connection(("yandex.ru", 443), timeout=5)
+            sock.close()
+            self._online = True
+        except (socket.timeout, socket.gaierror, OSError, Exception):
+            self._online = False
+        
+        # Если статус изменился — обновляем иконку
+        if old_online != self._online:
+            logger.info(f"Статус подключения изменился: {'онлайн' if self._online else 'офлайн'}")
+            self._update_app_icons(update_tray_only=True)
 
     def _sync_log_zorder(self):
         """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
