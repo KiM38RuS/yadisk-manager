@@ -1788,6 +1788,43 @@ class MainWindow(QMainWindow):
                 lw.raise_()
                 self.raise_()
 
+    def _sync_log_zorder(self):
+        """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
+        панели задач, клик по окну) лог поднимается на передний план сразу
+        за Менеджером. При потере фокуса лог НЕ опускается и НЕ прячется:
+        переключение в другое окно не должно делать лог невидимым (раньше
+        lw.lower() уводил его на дно z-order, под окно Менеджера); активное
+        чужое окно накроет лог само, если окна перекрываются. Лог прячется
+        только вместе со сворачиванием Менеджера (_on_manager_state_change).
+        Клик по логу поднимает его над Менеджером — «всегда поверх» нет."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None or not lw.isVisible() or self.isMinimized():
+            return
+        if self.isActiveWindow():
+            lw.raise_()
+            self.raise_()
+            # Подстраховка: raise() меняет z-order без смены фокуса, но если
+            # Windows всё же отдал фокус логу — вернуть его Менеджеру.
+            if QApplication.activeWindow() is lw:
+                QTimer.singleShot(0, self.activateWindow)
+
+    def _on_manager_state_change(self):
+        """При сворачивании Менеджера прятать окно лога (у него нет значка
+        на панели задач — вернуть его можно только вместе с Менеджером)."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None:
+            return
+        if self.isMinimized():
+            if lw.isVisible():
+                self._log_visible_before_minimize = True
+                lw.hide()
+        else:
+            if getattr(self, '_log_visible_before_minimize', False):
+                self._log_visible_before_minimize = False
+                lw.show()
+                lw.raise_()
+                self.raise_()
+
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
             self._sync_log_zorder()
