@@ -119,4 +119,21 @@ dmypy.json
 
 # Coverage
 .coverage*
+
+# AI и виртуальные окружения
+.claude/
+.pi/
+
+# Логи и временные файлы
+*.txt
+LOG.txt
+Backup/**/*.txt
+
+# Скомпилированные файлы и тесты
+YaDiskManager.exe
+Test/
+Reference/
+icon-dev/
+wiki/
+tests/text_*.json
 ```
