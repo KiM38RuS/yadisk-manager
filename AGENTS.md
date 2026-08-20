@@ -97,6 +97,24 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 - Обновление применяется только в frozen-режиме (exe): скачивание в `YaDiskManager.new.exe` рядом с текущим, скрытый `apply_update.bat` ждёт выхода приложения, переименовывает и запускает новый exe. В dev-режиме — только скачивание в temp.
 - Авто-проверка: через 20 сек после старта и каждые 4 часа; уведомление в трее; настройка в Настройках (по умолчанию вкл.).
 
+### 📋 Цикл релиза (чек-лист)
+
+Полный порядок действий при выпуске новой версии:
+
+| # | Шаг | Команда / Действие |
+|---|-----|-------------------|
+| 1 | **Остановить приложение** (если запущено) | `python -c "from ipc import send_ipc_command; send_ipc_command('shutdown')"` |
+| 2 | **Обновить CHANGELOG.md** | Вручную: описать все изменения с момента прошлой версии |
+| 3 | **Обновить PLANS.md** | Убрать исправленные баги из «Открытые баги», добавить в «✅ Выполнено»; очистить инбокс от закрытых пунктов |
+| 4 | **Обновить DESIGN.md** | Отразить архитектурные изменения (новые методы, компоненты, связи) |
+| 5 | **Скопировать бэкап** | `Backup/{old_ver}/` → `Backup/{new_ver}/` (все `.py` + `requirements.txt`); после правок кода — обновить бэкап повторно |
+| 6 | **Собрать exe** | `build_exe.bat` (IPC выставится автоматически) |
+| 7 | **Собрать инсталлер** | `"D:\Program_files\InnoSetup\ISCC.exe" installer.iss /DMyAppVersion={ver}` → `dist\Setup_YaDiskManager_v{ver}.exe` |
+| 8 | **Git commit + push** | `git add` (`.py`, `.md`, `Backup/`), `git commit`, `git push origin main` |
+| 9 | **Git tag** | `git tag v{ver}`, `git push origin v{ver}` |
+| 10 | **Создать релиз на GitHub** | GitHub → Releases → Draft new release → выбрать тег, загрузить `YaDiskManager.exe` + `Setup_*.exe` |
+| 11 | **Переименовать сессию** | Если harness доступен: `hermes sessions rename $ID "YaDiskManager v{ver} [описание]"` |
+
 ### 🏷️ Именование сессий
 
 При изменении версии проекта (bump в `_version.py`) агент автоматически переименовывает текущую сессию в формат:
