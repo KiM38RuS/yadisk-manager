@@ -1,0 +1,52 @@
+[
+  {
+    "title": "yadisk · PyPI",
+    "href": "https://pypi.org/project/yadisk/",
+    "body": "Библиотека-клиент REST API Яндекс.Диска / Yandex.Disk REST API client library"
+  },
+  {
+    "title": "GitHub - ivknv/yadisk: Библиотека-клиент REST API Яндекс.Диска для Python / Yandex.Disk REST API client library for Python · GitHub",
+    "href": "https://github.com/ivknv/yadisk",
+    "body": "Библиотека-клиент REST API Яндекс.Диска для Python / Yandex.Disk REST API client library for Python - ivknv/yadisk"
+  },
+  {
+    "title": "yandex-disk · GitHub Topics · GitHub",
+    "href": "https://github.com/topics/yandex-disk?l=python",
+    "body": "Консольный клиент ...ка-клиент REST API Яндекс.Диска для Python / Yandex.Disk REST API client library for Python..."
+  },
+  {
+    "title": "GitHub - Kolyaj/yandex-disk: Клиент для Яндекс.Диска на NodeJS · GitHub",
+    "href": "https://github.com/Kolyaj/yandex-disk",
+    "body": "```javascript var YandexDisk = require('yandex-disk').YandexDisk; var disk = new YandexDisk(oauthToken); // доступ по OAuth токену // или var disk = new YandexDisk(login, password); // доступ по логину и паролю ```"
+  },
+  {
+    "title": "Yandex Disk (Русский) - ArchWiki",
+    "href": "https://wiki.archlinux.org/title/Yandex_Disk_(Русский)",
+    "body": "February 16, 2022 - Установите пакет yandex-diskAUR. Официальный клиент не имеет графического интерфейса, но есть #Неофициальные клиенты. Для настройки прокcи, имени пользователя и ..."
+  },
+  {
+    "title": "Introduction — YaDisk 3.4.1 documentation",
+    "href": "https://yadisk.readthedocs.io/en/latest/intro.html",
+    "body": "import yadisk client = yadisk.Client(token=\"\") # or # client = yadisk.Client(\"\", \"\", \"\") # You can either use the with statement or manually call client.close() later with client: # Check if the token is valid print(client.check_token()) # Get ..."
+  },
+  {
+    "title": "Disk API — Yandex Technologies",
+    "href": "https://yandex.com/dev/disk/",
+    "body": "Yandex.Disk is a service for storing files on remote Yandex servers and sharing them with others. Data can be accessed by logging in from any device connected to the internet."
+  },
+  {
+    "title": "piwheels - yadisk",
+    "href": "https://www.piwheels.org/project/yadisk/",
+    "body": "The piwheels project page for yadisk: Библиотека-клиент REST API Яндекс.Диска / Yandex.Disk REST API client library"
+  },
+  {
+    "title": "Yandex.Disk - an alternative to Google Drive with native Linux support - Linux notes from DarkDuck",
+    "href": "http://linuxblog.darkduck.com/2016/08/yandexdisk-alternative-to-google-drive.html",
+    "body": "August 23, 2016 - Installing the GUI. There are more fun ways to integrate your file manager with Yandex.Disk and to control the Yandex.Disk client using the GUI. You need to install additional package YD-tools for that. Unfortunately, it is only available for DEB distributions."
+  },
+  {
+    "title": "GitHub - freylis/yadisk-api: Yandex.disk HTTP API Python library · GitHub",
+    "href": "https://github.com/freylis/yadisk-api",
+    "body": "Yandex.disk HTTP API Python library. Contribute to freylis/yadisk-api development by creating an account on GitHub."
+  }
+]

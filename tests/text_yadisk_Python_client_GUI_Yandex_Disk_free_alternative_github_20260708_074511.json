@@ -1,0 +1,52 @@
+[
+  {
+    "title": "GitHub - QAZYAE/YaDisk_GUI",
+    "href": "https://github.com/QAZYAE/YaDisk_GUI",
+    "body": "Contribute to QAZYAE/YaDisk_GUI development by creating an account on GitHub."
+  },
+  {
+    "title": "GitHub - ivknv/yadisk: Библиотека-клиент REST API Яндекс.Диска для ...",
+    "href": "https://github.com/ivknv/yadisk",
+    "body": "Библиотека-клиент REST API Яндекс.Диска для Python / Yandex.Disk REST API client library for Python - ivknv/yadisk"
+  },
+  {
+    "title": "yadisk · PyPI",
+    "href": "https://pypi.org/project/yadisk/",
+    "body": "Библиотека-клиент REST API Яндекс.Диска / Yandex.Disk REST API client library"
+  },
+  {
+    "title": "yadisk._client — YaDisk 3.4.1 documentation",
+    "href": "https://yadisk.readthedocs.io/en/stable/_modules/yadisk/_client.html",
+    "body": "[docs] defget_device_code(self,**kwargs)->\"DeviceCodeObject\":\"\"\" This request is used for authorization using the Yandex OAuth page. In this case the user must enter the verification code (:code:`user_code`) in the browser on the Yandex OAuth page. After the user has entered the code on the OAuth page, the application can exchange the :code:`device_code` for the token using the :any:`Client ..."
+  },
+  {
+    "title": "YaDiskClient · PyPI",
+    "href": "https://pypi.org/project/YaDiskClient/",
+    "body": "License: MIT License (MIT) Author: Tags Yandex.Disk , webdav , client , python , Yandex Development Status Environment Intended Audience License Operating System Programming Language Topic Release history Release notifications | RSS feed"
+  },
+  {
+    "title": "yadisk.utils — YaDisk 3.4.0 documentation",
+    "href": "https://yadisk.readthedocs.io/en/stable/_modules/yadisk/utils.html",
+    "body": "This library is free software; you can redistribute it and/or modify# it under the terms of the GNU Lesser General Public License as published# by the Free Software Foundation; either version 3 of the License, or# (at your option) any later version.#"
+  },
+  {
+    "title": "Python版Yandex.Disk REST API客户端库实战应用-CSDN博客",
+    "href": "https://blog.csdn.net/weixin_29050829/article/details/152933039",
+    "body": "简介：yadisk是一个专为Python 3设计的Yandex.Disk云存储服务REST API客户端库，支持OAuth2身份验证，提供文件上传、下载、管理、共享、版本控制和同步等核心功能。 通过封装RESTful接口，该库简化了与Yandex.Disk的交互流程，帮助开发者高效实现云端文件操作。"
+  },
+  {
+    "title": "YaDiskClient 1.0.1 on PyPI - Libraries.io",
+    "href": "https://libraries.io/pypi/YaDiskClient",
+    "body": "Clent for Yandex.Disk - 1.0.1 - a Python package on PyPI"
+  },
+  {
+    "title": "How I Backed Up My Entire Yandex.Disk Archive with Python Before ...",
+    "href": "https://levelup.gitconnected.com/how-i-backed-up-my-entire-yandex-disk-archive-with-python-before-canceling-my-subscription-111b4a9ddec3",
+    "body": "The Plan So I outlined my plan: Use Python to connect to Yandex.Disk via WebDAV. Recursively list all folders and files. Download everything with progress bars and logging. Handle Cyrillic and special characters properly. Keep folder structure intact. This would give me a portable archive I could later upload anywhere — Google Drive, Mega, pCloud, Dropbox, you name it."
+  },
+  {
+    "title": "YaDisk (websites/yadisk_readthedocs_io_en) | Context7",
+    "href": "https://context7.com/websites/yadisk_readthedocs_io_en",
+    "body": "YaDisk is a Python library providing synchronous and asynchronous API access to the Yandex.Disk REST API, enabling programmatic interaction with Yandex.Disk storage. - Latest version"
+  }
+]

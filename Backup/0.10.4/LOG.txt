@@ -1,0 +1,366 @@
+17:31:10 [INFO] ui: Initial load: starting async fetch of /
+17:31:10 [INFO] ui: Fetching /...
+17:31:10 [INFO] ipc: IPC server listening on 127.0.0.1:43210
+17:31:10 [INFO] ui.threads: ApiListThread: fetching /...
+17:31:11 [INFO] ui: Startup scan: launching background thread...
+17:31:11 [INFO] ui.threads: StartupScanThread: scanning local cache...
+17:31:12 [INFO] ui.threads: StartupScanThread: stale=0, changed=0, new=0
+17:31:12 [INFO] ui: Startup scan: all clean
+17:31:12 [INFO] watcher: File watcher started on D:/YandexDiskTestFolder (recursive)
+17:31:12 [INFO] main: Connected. Total: 259.8 GB, Used: 129.4 GB, Free: 130.5 GB
+17:31:13 [INFO] ui.threads: ApiListThread: / -> 21 items
+17:31:13 [INFO] ui.tree_model: Tree: / → 20 папок
+17:31:13 [INFO] ui: Tree loaded: root has 20 children
+17:31:13 [INFO] ui: Fetching /...
+17:31:13 [INFO] ui.threads: ApiListThread: fetching /...
+17:31:14 [INFO] ui.threads: ApiListThread: / -> 21 items
+17:31:14 [INFO] ui: File list loaded: 21 items
+17:31:14 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~546 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 310, in <lambda>
+    thread.finished.connect(lambda items, err: on_done(items, err))
+  File "D:\Program_files\YaDiskManager\ui.py", line 348, in _on_file_list_loaded
+    self._apply_file_list("/", items)
+  File "D:\Program_files\YaDiskManager\ui.py", line 453, in _apply_file_list
+    self._load_folder_local(path)
+  File "D:\Program_files\YaDiskManager\ui.py", line 2719, in _load_folder_local
+    db_records = self._db.get_children(path)
+  File "D:\Program_files\YaDiskManager\db.py", line 646, in get_children
+    rows = self._conn.execute("""
+17:31:14 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~750 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 310, in <lambda>
+    thread.finished.connect(lambda items, err: on_done(items, err))
+  File "D:\Program_files\YaDiskManager\ui.py", line 350, in _on_file_list_loaded
+    self._hide_table_loading()
+  File "D:\Program_files\YaDiskManager\ui.py", line 386, in _hide_table_loading
+    self._table_stack.setCurrentIndex(1)
+17:31:14 [INFO] ui.threads: AllFilesThread: loading all files (resume offset=16800)...
+17:31:16 [INFO] ui: Fetching /Sync...
+17:31:16 [INFO] ui.threads: ApiListThread: fetching /Sync...
+17:31:18 [INFO] ui.threads: ApiListThread: /Sync -> 20 items
+17:31:27 [INFO] ui: Fetching /Sync/YaDiskManager...
+17:31:27 [INFO] ui.threads: ApiListThread: fetching /Sync/YaDiskManager...
+17:31:28 [INFO] ui.threads: ApiListThread: /Sync/YaDiskManager -> 0 items
+17:32:19 [INFO] ui: Fetching /Sync...
+17:32:19 [INFO] ui.threads: ApiListThread: fetching /Sync...
+17:32:20 [INFO] ui.threads: ApiListThread: /Sync -> 20 items
+17:32:24 [WARNING] ui: ⚠️ SLOW WINDOW EVENT: type=77(UpdateRequest) took 235ms
+17:32:24 [INFO] ui.threads: FolderDownloadThread: BFS 1 folder(s)...
+17:32:26 [INFO] ui: Empty folder created locally: /Sync/YaDiskManager → D:/YandexDiskTestFolder\Sync/YaDiskManager
+17:32:26 [WARNING] ui: ⚠️ SLOW WINDOW EVENT: type=43(MetaCall) took 1063ms
+17:32:26 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~672 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 251, in event
+    result = super().event(event)
+  File "D:\Program_files\YaDiskManager\ui.py", line 2889, in _on_folder_download_ready
+    self.table_model.refresh_statuses()
+  File "D:\Program_files\YaDiskManager\ui_table_model.py", line 232, in refresh_statuses
+    new_status = self._db.get_folder_aggregate_status(cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:26 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~875 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 251, in event
+    result = super().event(event)
+  File "D:\Program_files\YaDiskManager\ui.py", line 2899, in _on_folder_download_ready
+    if not self._db.get_children(fp):
+  File "D:\Program_files\YaDiskManager\db.py", line 646, in get_children
+    rows = self._conn.execute("""
+17:32:27 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~609 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:27 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~811 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:27 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~1014 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:27 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~1218 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:28 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~1406 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 702, in get_folder_aggregate_status
+    with self._lock:
+17:32:28 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~1625 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:28 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~1827 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:28 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~2031 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:28 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~2234 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:29 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~2421 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:29 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~2625 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:29 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~2827 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:29 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~3031 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:29 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~3250 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 154, in data
+    status = self._db.get_folder_aggregate_status(item.cloud_path)
+  File "D:\Program_files\YaDiskManager\db.py", line 703, in get_folder_aggregate_status
+    rows = self._conn.execute("""
+17:32:30 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~3452 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 251, in event
+    result = super().event(event)
+  File "D:\Program_files\YaDiskManager\ui_tree_model.py", line 159, in data
+    return _svg_icon(STATUS_ICON[status], 20)
+  File "D:\Program_files\YaDiskManager\ui_shared.py", line 74, in _svg_icon
+    theme = db.get_theme()
+  File "D:\Program_files\YaDiskManager\db.py", line 79, in get_theme
+    return load_config().get("theme", "system")
+  File "D:\Program_files\YaDiskManager\db.py", line 34, in load_config
+    if os.path.exists(CONFIG_PATH):
+17:32:30 [WARNING] ui: ⚠️ SLOW WINDOW EVENT: type=77(UpdateRequest) took 218ms
+17:33:12 [WARNING] ui: ⚠️ SLOW WINDOW EVENT: type=77(UpdateRequest) took 203ms
+17:33:12 [INFO] ui: Fetching /Sync/Coding...
+17:33:12 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding...
+17:33:14 [INFO] ui.threads: ApiListThread: /Sync/Coding -> 31 items
+17:33:14 [INFO] ui: Fetching /Sync/Coding/YaDiskManager...
+17:33:14 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding/YaDiskManager...
+17:33:15 [INFO] ui.threads: ApiListThread: /Sync/Coding/YaDiskManager -> 41 items
+17:33:16 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~547 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 310, in <lambda>
+    thread.finished.connect(lambda items, err: on_done(items, err))
+  File "D:\Program_files\YaDiskManager\ui.py", line 2623, in on_refreshed
+    self._load_folder_local(path)
+  File "D:\Program_files\YaDiskManager\ui.py", line 2719, in _load_folder_local
+    db_records = self._db.get_children(path)
+  File "D:\Program_files\YaDiskManager\db.py", line 646, in get_children
+    rows = self._conn.execute("""
+17:33:22 [INFO] ui: Fetching /Sync/Coding/YaDiskManager/wiki...
+17:33:22 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding/YaDiskManager/wiki...
+17:33:23 [INFO] ui.threads: ApiListThread: /Sync/Coding/YaDiskManager/wiki -> 1 items
+17:33:23 [WARNING] ui: ⚠️ FREEZE: UI blocked for ~577 ms
+  File "D:\Program_files\YaDiskManager\main.py", line 220, in <module>
+    main()
+  File "D:\Program_files\YaDiskManager\main.py", line 119, in main
+    sys.exit(app.exec())
+  File "D:\Program_files\YaDiskManager\ui.py", line 310, in <lambda>
+    thread.finished.connect(lambda items, err: on_done(items, err))
+  File "D:\Program_files\YaDiskManager\ui.py", line 2623, in on_refreshed
+    self._load_folder_local(path)
+  File "D:\Program_files\YaDiskManager\ui.py", line 2719, in _load_folder_local
+    db_records = self._db.get_children(path)
+  File "D:\Program_files\YaDiskManager\db.py", line 646, in get_children
+    rows = self._conn.execute("""
+17:33:25 [INFO] ui: Fetching /Sync/Coding/YaDiskManager/wiki/references...
+17:33:25 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding/YaDiskManager/wiki/references...
+17:33:26 [INFO] ui.threads: ApiListThread: /Sync/Coding/YaDiskManager/wiki/references -> 1 items
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\AGENTS.md
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/db.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\CHANGELOG.md
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\db.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\DESIGN.md
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\disk_api.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\icon-main.ico
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ipc.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\LICENSE
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\LOG.txt
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\main.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\README.md
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\requirements.txt
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/LICENSE
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/main.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/README.md
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/requirements.txt
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\research.md
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\sync.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui.py.bak
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_braille_spinner.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_dialogs.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_log.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_search_edit.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_shared.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_table_model.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/sync.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ui_braille_spinner.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ui_dialogs.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ui_search_edit.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ui_shared.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_threads.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_tree_model.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ui_workers.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\watcher.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\_timed_main.py
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\БАГИ.md
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\ПЛАНЫ.md
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ui_tree_model.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ui_workers.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/watcher.py
+17:34:22 [INFO] ui: Local file deleted, set cloud_only: /Sync/Coding/YaDiskManager/ПЛАНЫ.md
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\Assets
+17:34:22 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\Backup
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\icon-dev
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\logs
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\AGENTS.md
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\CHANGELOG.md
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\db.py
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\DESIGN.md
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\disk_api.py
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\icon-main.ico
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\ipc.py
+17:34:23 [INFO] watcher: File created (debounced): D:/YandexDiskTestFolder\Sync\YaDiskManager\LICENSE
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\Reference
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\AGENTS.md → /Sync/YaDiskManager/AGENTS.md
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\CHANGELOG.md → /Sync/YaDiskManager/CHANGELOG.md
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\db.py → /Sync/YaDiskManager/db.py
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\DESIGN.md → /Sync/YaDiskManager/DESIGN.md
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\disk_api.py → /Sync/YaDiskManager/disk_api.py
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\icon-main.ico → /Sync/YaDiskManager/icon-main.ico
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\ipc.py → /Sync/YaDiskManager/ipc.py
+17:34:23 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Sync\YaDiskManager\LICENSE → /Sync/YaDiskManager/LICENSE
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\Test
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\tests
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\wiki
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager\__pycache__
+17:34:23 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Sync\Coding\YaDiskManager
+17:34:26 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/disk_api.py
+17:34:26 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/icon-main.ico
+17:34:30 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/AGENTS.md
+17:34:30 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/db.py
+17:34:30 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/CHANGELOG.md
+17:34:30 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/DESIGN.md
+17:34:30 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/LICENSE
+17:34:31 [WARNING] ui: start_upload: already syncing /Sync/YaDiskManager/ipc.py
+17:34:42 [INFO] ui: Fetching /Sync/Coding/YaDiskManager/wiki...
+17:34:42 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding/YaDiskManager/wiki...
+17:34:43 [INFO] ui.threads: ApiListThread: /Sync/Coding/YaDiskManager/wiki -> 1 items
+17:34:45 [INFO] ui: Fetching /Sync/Coding/YaDiskManager...
+17:34:45 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding/YaDiskManager...
+17:34:46 [INFO] ui.threads: ApiListThread: /Sync/Coding/YaDiskManager -> 41 items
+17:34:46 [INFO] ui: Fetching /Sync/Coding...
+17:34:46 [INFO] ui.threads: ApiListThread: fetching /Sync/Coding...
+17:34:47 [INFO] ui.threads: ApiListThread: /Sync/Coding -> 31 items
+17:34:48 [INFO] ui: Fetching /Sync...
+17:34:48 [INFO] ui.threads: ApiListThread: fetching /Sync...
+17:34:49 [INFO] ui.threads: ApiListThread: /Sync -> 20 items
+17:34:56 [INFO] ui: Fetching /Sync/YaDiskManager...
+17:34:56 [INFO] ui.threads: ApiListThread: fetching /Sync/YaDiskManager...
+17:34:56 [INFO] ui.threads: ApiListThread: /Sync/YaDiskManager -> 0 items
+17:35:00 [INFO] ui: Fetching /Sync...
+17:35:00 [INFO] ui.threads: ApiListThread: fetching /Sync...
+17:35:01 [INFO] ui.threads: ApiListThread: /Sync -> 20 items
+17:35:02 [INFO] ui: Fetching /...
+17:35:02 [INFO] ui.threads: ApiListThread: fetching /...
+17:35:02 [INFO] ui.threads: ApiListThread: / -> 21 items
+17:35:04 [INFO] ui: Fetching /Sync...
+17:35:04 [INFO] ui.threads: ApiListThread: fetching /Sync...
+17:35:05 [INFO] ui.threads: ApiListThread: /Sync -> 20 items
+17:35:06 [INFO] ui: Fetching /Sync/YaDiskManager...
+17:35:06 [INFO] ui.threads: ApiListThread: fetching /Sync/YaDiskManager...
+17:35:07 [INFO] ui.threads: ApiListThread: /Sync/YaDiskManager -> 0 items

@@ -1,0 +1,35 @@
+17:45:42 [INFO] ui: Initial load: starting async fetch of /
+17:45:42 [INFO] ui: Fetching /...
+17:45:42 [INFO] ipc: IPC server listening on 127.0.0.1:43210
+17:45:42 [INFO] ui: ApiListThread: fetching /...
+17:45:42 [INFO] ui: Startup scan: launching background thread...
+17:45:42 [INFO] ui: StartupScanThread: scanning local cache...
+17:45:43 [INFO] ui: StartupScanThread: stale=0, changed=2, new=0
+17:45:43 [INFO] ui: Startup: local file changed, will upload: /Документы/debug.log
+17:45:43 [INFO] ui: Startup: local file changed, will upload: /Документы/Каталог песен (Скрипт AHK).ahk
+17:45:43 [INFO] watcher: File watcher started on D:/YandexDiskTestFolder (recursive)
+17:45:44 [INFO] main: Connected. Total: 259.8 GB, Used: 129.4 GB, Free: 130.5 GB
+17:45:44 [INFO] ui: ApiListThread: / -> 21 items
+17:45:44 [INFO] ui: Tree: / → 20 папок
+17:45:44 [INFO] ui: Tree loaded: root has 20 children
+17:45:44 [INFO] ui: Fetching /...
+17:45:49 [INFO] main: IPC: raise window requested
+17:45:44 [INFO] ui: ApiListThread: fetching /...
+17:45:44 [INFO] watcher: File deleted: D:/YandexDiskTestFolder\Документы\debug.log
+17:45:45 [INFO] ui: ApiListThread: / -> 21 items
+17:45:52 [INFO] ui: File list loaded: 21 items
+17:45:46 [INFO] ipc: IPC command: raise
+17:45:52 [INFO] ui: AllFilesThread: loading all files (resume offset=61000)...
+17:45:57 [INFO] ui: Uploaded: /Документы/debug.log
+17:46:04 [INFO] ui: Uploaded: /Документы/Каталог песен (Скрипт AHK).ahk
+17:46:19 [INFO] watcher: File modified (debounced): D:/YandexDiskTestFolder\Документы\debug.log
+17:46:19 [INFO] ui: Unknown local file modified, treating as created: D:/YandexDiskTestFolder\Документы\debug.log
+17:46:19 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Документы\debug.log → /Документы/debug.log
+17:46:25 [INFO] ui: Uploaded: /Документы/debug.log
+17:50:57 [INFO] watcher: File moved: D:/YandexDiskTestFolder\Документы\6D815110 → D:/YandexDiskTestFolder\Документы\Каталог песен.xlsx
+17:50:57 [INFO] watcher: File modified (debounced): D:/YandexDiskTestFolder\Документы\Каталог песен.xlsx
+17:50:57 [INFO] ui: Moved from unknown path: D:/YandexDiskTestFolder\Документы\6D815110 → None
+17:50:57 [WARNING] ui: Watcher handler error: 'NoneType' object has no attribute 'replace'
+17:50:57 [INFO] ui: Unknown local file modified, treating as created: D:/YandexDiskTestFolder\Документы\Каталог песен.xlsx
+17:50:57 [INFO] ui: New local file detected, uploading: D:/YandexDiskTestFolder\Документы\Каталог песен.xlsx → /Документы/Каталог песен.xlsx
+17:51:03 [INFO] ui: Uploaded: /Документы/Каталог песен.xlsx
