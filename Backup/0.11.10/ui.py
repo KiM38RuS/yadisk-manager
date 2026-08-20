@@ -23,7 +23,7 @@ from PySide6.QtGui import (
     QAction, QIcon, QFont, QColor, QPalette, QBrush,
     QFontDatabase, QShortcut, QKeySequence, QPixmap,
     QPainter, QLinearGradient, QMovie, QGuiApplication,
-    QDesktopServices, QDrag, QCursor,
+    QDesktopServices, QDrag, QCursor, QImage, qRgba,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -197,6 +197,12 @@ class MainWindow(QMainWindow):
         self._search_history_timer.setSingleShot(True)
         self._search_history_timer.timeout.connect(self._save_search_history)
         self._search_history_ms = 2000
+
+        # ── проверка интернет-соединения ──────────────────
+        self._online = True  # считаем что онлайн до первой проверки
+        self._connectivity_timer = QTimer(self)
+        self._connectivity_timer.timeout.connect(self._check_connectivity)
+        self._connectivity_timer.start(30000)  # проверять каждые 30 секунд
 
         # Предотвращение рекурсии при перекрёстном снятии выделения
         self._selection_updating = False
@@ -1584,9 +1590,12 @@ class MainWindow(QMainWindow):
         """Собрать статусы всех выделенных элементов (файлов и папок).
 
         Для папок определяем реальный статус через БД (downloaded / cloud_only).
+        Папки батчатся в один get_folder_batch_aggregate_status запрос.
         Элемент \"..\" игнорируется.
         """
         statuses: set[str] = set()
+        folder_paths: list[str] = []
+
         for idx in table_rows:
             item = self._get_item(idx)
             if not item:
@@ -1596,20 +1605,20 @@ class MainWindow(QMainWindow):
             if not item.get("is_dir"):
                 statuses.add(item["status"])
             else:
-                cp = item["cloud_path"]
-                if self._db.is_folder_fully_synced(cp):
-                    statuses.add("downloaded")
-                else:
-                    statuses.add("cloud_only")
+                folder_paths.append(item["cloud_path"])
+
         if tree_rows:
             for idx in tree_rows:
                 cp = idx.data(Qt.UserRole)
-                # Корень диска («Яндекс Диск») — только навигация, не операция
                 if cp and cp != "/":
-                    if self._db.is_folder_fully_synced(cp):
-                        statuses.add("downloaded")
-                    else:
-                        statuses.add("cloud_only")
+                    folder_paths.append(cp)
+
+        if folder_paths:
+            batch = self._db.get_folder_batch_aggregate_status("/", folder_paths)
+            for fp in folder_paths:
+                agg = batch.get(fp, "cloud_only")
+                statuses.add("downloaded" if agg == "downloaded" else "cloud_only")
+
         return statuses
 
     # ── Tray ──────────────────────────────────────────────
@@ -1682,23 +1691,117 @@ class MainWindow(QMainWindow):
         return QIcon()
 
     @classmethod
-    def _pick_tray_icon(cls) -> QIcon:
-        """Иконка для системного трея — 16px с учётом темы (светлая/тёмная)."""
+    def _pick_tray_icon(cls, force_offline: bool = False) -> QIcon:
+        """Иконка для системного трея — 16px с учётом темы (светлая/тёмная).
+        Если force_offline=True — возвращает полупрозрачную версию иконки."""
         ico = "icon-light-16.ico" if cls._is_windows_dark_mode() else "icon-16.ico"
         path = os.path.join(os.path.dirname(__file__), "Assets", ico)
-        if os.path.isfile(path):
-            return QIcon(path)
+        base_path = path if os.path.isfile(path) else None
+        
         # fallback на icon-main.ico если 16px нет
-        fallback = os.path.join(os.path.dirname(__file__), "icon-main.ico")
-        if os.path.isfile(fallback):
-            return QIcon(fallback)
-        return QIcon()
+        if base_path is None:
+            fallback = os.path.join(os.path.dirname(__file__), "icon-main.ico")
+            if os.path.isfile(fallback):
+                base_path = fallback
+        
+        if base_path is None:
+            return QIcon()
+        
+        if not force_offline:
+            return QIcon(base_path)
+        
+        # Создаём полупрозрачную версию иконки
+        pixmap = QPixmap(base_path)
+        if pixmap.isNull():
+            return QIcon(base_path)
+        
+        # Конвертируем в QImage для манипуляции с альфа-каналом
+        image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
+        
+        # Делаем изображение полупрозрачным (альфа-канал ~50%)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                pixel = image.pixel(x, y)
+                a = qRgba(pixel >> 24 & 0xFF, pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF)
+                alpha = (pixel & 0xFF)  # текущий альфа-канал
+                new_alpha = int(alpha * 0.5)  # уменьшаем до 50%
+                image.setPixel(x, y, qRgba(pixel >> 24 & 0xFF, pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, new_alpha))
+        
+        return QIcon(QPixmap.fromImage(image))
 
     def _update_app_icons(self, update_tray_only: bool = False):
         if not update_tray_only:
             self.setWindowIcon(self._pick_window_icon())
         if hasattr(self, "_tray") and self._tray:
-            self._tray.setIcon(self._pick_tray_icon())
+            self._tray.setIcon(self._pick_tray_icon(force_offline=not self._online))
+        # Обновляем иконки в меню трея (после смены темы)
+        # Обновление выполняется только если не update_tray_only=False (т.е. при полной смене темы),
+        # чтобы избежать лишних обновлений при проверке подключения
+        if not update_tray_only:
+            if hasattr(self, "_tray_act_show"):
+                self._tray_act_show.setIcon(_svg_icon("home-svgrepo-com.svg", 24))
+            # Находим действие "Настройки" в меню и обновляем его иконку
+            if hasattr(self, "_tray_menu"):
+                for action in self._tray_menu.actions():
+                    if action.text() == "Настройки":
+                        action.setIcon(_svg_icon("settings-grey.svg", 24))
+                        break
+
+    def _check_connectivity(self):
+        """Проверка интернет-соединения через запрос к yandex.ru.
+        При изменении статуса обновляет иконку в трее."""
+        import socket
+        
+        old_online = self._online
+        try:
+            # Пробуем подключиться к yandex.ru:443 (HTTPS)
+            sock = socket.create_connection(("yandex.ru", 443), timeout=5)
+            sock.close()
+            self._online = True
+        except (socket.timeout, socket.gaierror, OSError, Exception):
+            self._online = False
+        
+        # Если статус изменился — обновляем иконку
+        if old_online != self._online:
+            logger.info(f"Статус подключения изменился: {'онлайн' if self._online else 'офлайн'}")
+            self._update_app_icons(update_tray_only=True)
+
+    def _sync_log_zorder(self):
+        """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
+        панели задач, клик по окну) лог поднимается на передний план сразу
+        за Менеджером. При потере фокуса лог НЕ опускается и НЕ прячется:
+        переключение в другое окно не должно делать лог невидимым (раньше
+        lw.lower() уводил его на дно z-order, под окно Менеджера); активное
+        чужое окно накроет лог само, если окна перекрываются. Лог прячется
+        только вместе со сворачиванием Менеджера (_on_manager_state_change).
+        Клик по логу поднимает его над Менеджером — «всегда поверх» нет."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None or not lw.isVisible() or self.isMinimized():
+            return
+        if self.isActiveWindow():
+            lw.raise_()
+            self.raise_()
+            # Подстраховка: raise() меняет z-order без смены фокуса, но если
+            # Windows всё же отдал фокус логу — вернуть его Менеджеру.
+            if QApplication.activeWindow() is lw:
+                QTimer.singleShot(0, self.activateWindow)
+
+    def _on_manager_state_change(self):
+        """При сворачивании Менеджера прятать окно лога (у него нет значка
+        на панели задач — вернуть его можно только вместе с Менеджером)."""
+        lw = getattr(self, '_log_window', None)
+        if lw is None:
+            return
+        if self.isMinimized():
+            if lw.isVisible():
+                self._log_visible_before_minimize = True
+                lw.hide()
+        else:
+            if getattr(self, '_log_visible_before_minimize', False):
+                self._log_visible_before_minimize = False
+                lw.show()
+                lw.raise_()
+                self.raise_()
 
     def _sync_log_zorder(self):
         """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
@@ -2056,127 +2159,26 @@ class MainWindow(QMainWindow):
         self._show_left_busy("Проверка локальных файлов...")
 
         # Добавляем ref на поток, чтобы не собрался GC
-        thread = _StartupScanThread(self._db, cache_dir, self)
-        thread.finished.connect(lambda stale, changed, new_files, new_dirs:
-                                self._on_startup_scan_done(stale, changed, new_files, new_dirs))
+        thread = _StartupScanThread(self._api, self._db, cache_dir, self)
+        thread.finished.connect(self._on_startup_scan_done)
         thread.finished.connect(thread.deleteLater)
         self._startup_scan_thread = thread
         thread.start()
 
-    def _on_startup_scan_done(self, stale: set, changed: set, new_files: set, new_dirs: set | None = None):
+    def _on_startup_scan_done(self):
         """Обработка результатов стартового сканирования (главный поток)."""
-        if new_dirs is None:
-            new_dirs = set()
-        if getattr(self, '_cache_was_restored', False) and stale:
-            # Кеш был удалён, пользователь выбрал "Восстановить" —
-            # ставим все файлы на перекачку (через очередь, без блокировки)
-            self._show_left_busy(f"Восстанавливаю {len(stale)} файлов...")
-            for cp in stale:
-                if cp in self._syncing:
-                    continue
-                local_path = _local_path(cp)
-                self._syncing.add(cp)
-                self._download_queue.append((cp, local_path))
-                self.table_model.update_status(cp, "syncing")
-            self._process_download_queue()
-            logger.info("Restore: queued %d files for re-download", len(stale))
-        else:
-            # Stale — обновляем статус
-            for cp in stale:
-                self._db.set_cloud_only(cp)
-                self.table_model.update_item_status(cp, "cloud_only")
-                self._update_tree_status(cp)
-                logger.info("Startup: local file missing, set cloud_only: %s", cp)
-
-        # Changed — ставим на загрузку
-        changed_count = len(changed)
-        if changed_count:
-            logger.info("Startup: %d local files changed, will upload", changed_count)
-        for cp in changed:
-            info = self._db.get_file(cp)
-            if info and info.get("local_path") and os.path.exists(info["local_path"]):
-                self._register_new_file(info["local_path"], cp)
-            else:
-                self._pend_upload.add(cp)
-
-        # Новые папки на диске — создаём записи в БД
-        if new_dirs:
-            cache_dir_norm = _cache_dir().replace("\\", "/")
-            dir_count = 0
-            for dpath in new_dirs:
-                rel = dpath[len(cache_dir_norm):].lstrip("/")
-                cloud_path = "/" + rel
-                name = cloud_path.rstrip("/").split("/")[-1]
-                # Создаём все родительские папки
-                parts = cloud_path.strip("/").split("/")
-                for i in range(1, len(parts) + 1):
-                    parent = "/" + "/".join(parts[:i])
-                    if not self._db.get_file(parent):
-                        pname = parent.rstrip("/").split("/")[-1]
-                        self._db.upsert_file(parent, pname, "dir")
-                        self._db.set_status(parent, "downloaded")
-                # Отмечаем как downloaded
-                self._db.upsert_file(cloud_path, name, "dir")
-                self._db.set_downloaded(cloud_path, dpath)
-                dir_count += 1
-            logger.info("Startup: registered %d local directories", dir_count)
-
-        # New files — вычисляем cloud_path и ставим на загрузку
-        cache_dir_norm = _cache_dir().replace("\\", "/")
-        new_count = len(new_files)
-        if new_count:
-            logger.info("Startup: %d new local files detected", new_count)
-        for fpath in new_files:
-            rel = fpath[len(cache_dir_norm):].lstrip("/")
-            cloud_path = "/" + rel
-            existing = self._db.get_file(cloud_path)
-            if existing:
-                # Файл уже есть в облаке и в БД (cloud_only после
-                # «Оставить только в облаке»). Пользователь вручную
-                # скопировал файл обратно — просто отмечаем как downloaded.
-                local_md5 = _md5_file(fpath)
-                self._db.set_downloaded(cloud_path, fpath, local_md5)
-                self.table_model.update_item_status(cloud_path, "downloaded")
-                self._update_tree_status(cloud_path)
-                logger.info("Startup: restored local copy (was %s): %s",
-                            existing["status"], cloud_path)
-            else:
-                # Нет записи в БД — файл был удалён из облака через Delete,
-                # потом вручную восстановлен локально. Регистрируем как
-                # downloaded (с local_path), чтобы он отображался в интерфейсе.
-                # sync_children_from_api защитит его от удаления (local_path IS NOT NULL).
-                try:
-                    st = os.stat(fpath)
-                    size = st.st_size
-                    modified = datetime.fromtimestamp(
-                        st.st_mtime, tz=timezone.utc).isoformat()
-                    local_md5 = _md5_file(fpath)
-                except OSError:
-                    size = 0
-                    modified = ""
-                    local_md5 = ""
-                name = cloud_path.rstrip("/").split("/")[-1]
-                self._db.upsert_file(cloud_path, name, 'file',
-                                     size=size, modified=modified, md5=local_md5)
-                self._db.set_downloaded(cloud_path, fpath, last_sync_md5=local_md5)
-                self.table_model.update_item_status(cloud_path, "downloaded")
-                self._update_tree_status(cloud_path)
-                logger.info("Startup: registered local file as downloaded (no cloud copy): %s",
-                            cloud_path)
-
-        if changed or new_files:
-            QTimer.singleShot(2000, self._flush_pending_upload)
-            # Обновляем текущий вид из БД, чтобы подхватить изменённые статусы
-            QTimer.singleShot(100, lambda: self._load_folder_local(self._current_path))
+        # Вся обработка уже выполнена в фоне, нужно только обновить UI и запустить загрузку изменённых файлов
+        logger.info("Startup scan: done, refreshing UI...")
+        
+        # Обновляем текущий вид из БД, чтобы подхватить изменённые статусы
+        QTimer.singleShot(100, lambda: self._load_folder_local(self._current_path))
+        
+        # Запускаем загрузку изменённых файлов (если есть)
+        QTimer.singleShot(2000, self._flush_pending_upload)
+        
         # Проверка облака: новые файлы в полностью скачанных папках
-        # Автоскрытие — у поллинга нет явного финального колбэка,
-        # а периодические проверки (каждые 60 с) не должны мешать.
         self._show_left_busy("Проверка облака...", timeout=8000)
         QTimer.singleShot(100, self._poll_cloud)
-
-        if not stale and not changed and not new_files:
-            logger.info("Startup scan: all clean")
-            self._hide_left_busy()
 
         # Вотчер запускаем только после завершения стартового сканирования,
         # чтобы не поймать ложные файловые события во время проверки кеша
@@ -3399,6 +3401,7 @@ class MainWindow(QMainWindow):
                         self.table_view.clearSelection()
                         self._selection_updating = False
                         self._update_toolbar_buttons()
+                        self._update_selection_counter()
                 elif obj_is_table:
                     idx = self.table_view.indexAt(event.pos())
                     if idx.isValid():
@@ -3412,6 +3415,7 @@ class MainWindow(QMainWindow):
                         self.table_view.clearSelection()
                         self._selection_updating = False
                         self._update_toolbar_buttons()
+                        self._update_selection_counter()
 
             # ── MouseMove: DnD старт при превышении threshold (LMB или RMB) ────
             if (event.type() == QEvent.MouseMove
@@ -3858,13 +3862,19 @@ class MainWindow(QMainWindow):
         if not items:
             return
         try:
-            new_items = [it for it in items if not self._db.file_exists(it["path"])]
-            # Проверяем существующие downloaded файлы на изменение в облаке
+            all_paths = [it["path"] for it in items]
+            existing_paths = self._db.file_exists_batch(all_paths)
+            path_to_item = {it["path"]: it for it in items}
+
+            new_items = [path_to_item[p] for p in all_paths if p not in existing_paths]
+
             changed_items = []
-            for it in items:
-                if self._db.file_exists(it["path"]):
-                    rec = self._db.get_file(it["path"])
+            if existing_paths:
+                existing_records = self._db.get_files_batch(list(existing_paths))
+                for cp in existing_paths:
+                    rec = existing_records.get(cp)
                     if rec and rec.get("status") == "downloaded":
+                        it = path_to_item[cp]
                         cloud_md5 = it.get("md5", "")
                         last_sync = rec.get("last_sync_md5") or ""
                         if cloud_md5 and last_sync and cloud_md5 != last_sync:

@@ -1590,9 +1590,12 @@ class MainWindow(QMainWindow):
         """Собрать статусы всех выделенных элементов (файлов и папок).
 
         Для папок определяем реальный статус через БД (downloaded / cloud_only).
+        Папки батчатся в один get_folder_batch_aggregate_status запрос.
         Элемент \"..\" игнорируется.
         """
         statuses: set[str] = set()
+        folder_paths: list[str] = []
+
         for idx in table_rows:
             item = self._get_item(idx)
             if not item:
@@ -1602,20 +1605,20 @@ class MainWindow(QMainWindow):
             if not item.get("is_dir"):
                 statuses.add(item["status"])
             else:
-                cp = item["cloud_path"]
-                if self._db.is_folder_fully_synced(cp):
-                    statuses.add("downloaded")
-                else:
-                    statuses.add("cloud_only")
+                folder_paths.append(item["cloud_path"])
+
         if tree_rows:
             for idx in tree_rows:
                 cp = idx.data(Qt.UserRole)
-                # Корень диска («Яндекс Диск») — только навигация, не операция
                 if cp and cp != "/":
-                    if self._db.is_folder_fully_synced(cp):
-                        statuses.add("downloaded")
-                    else:
-                        statuses.add("cloud_only")
+                    folder_paths.append(cp)
+
+        if folder_paths:
+            batch = self._db.get_folder_batch_aggregate_status("/", folder_paths)
+            for fp in folder_paths:
+                agg = batch.get(fp, "cloud_only")
+                statuses.add("downloaded" if agg == "downloaded" else "cloud_only")
+
         return statuses
 
     # ── Tray ──────────────────────────────────────────────
@@ -3398,6 +3401,7 @@ class MainWindow(QMainWindow):
                         self.table_view.clearSelection()
                         self._selection_updating = False
                         self._update_toolbar_buttons()
+                        self._update_selection_counter()
                 elif obj_is_table:
                     idx = self.table_view.indexAt(event.pos())
                     if idx.isValid():
@@ -3411,6 +3415,7 @@ class MainWindow(QMainWindow):
                         self.table_view.clearSelection()
                         self._selection_updating = False
                         self._update_toolbar_buttons()
+                        self._update_selection_counter()
 
             # ── MouseMove: DnD старт при превышении threshold (LMB или RMB) ────
             if (event.type() == QEvent.MouseMove
@@ -3857,13 +3862,19 @@ class MainWindow(QMainWindow):
         if not items:
             return
         try:
-            new_items = [it for it in items if not self._db.file_exists(it["path"])]
-            # Проверяем существующие downloaded файлы на изменение в облаке
+            all_paths = [it["path"] for it in items]
+            existing_paths = self._db.file_exists_batch(all_paths)
+            path_to_item = {it["path"]: it for it in items}
+
+            new_items = [path_to_item[p] for p in all_paths if p not in existing_paths]
+
             changed_items = []
-            for it in items:
-                if self._db.file_exists(it["path"]):
-                    rec = self._db.get_file(it["path"])
+            if existing_paths:
+                existing_records = self._db.get_files_batch(list(existing_paths))
+                for cp in existing_paths:
+                    rec = existing_records.get(cp)
                     if rec and rec.get("status") == "downloaded":
+                        it = path_to_item[cp]
                         cloud_md5 = it.get("md5", "")
                         last_sync = rec.get("last_sync_md5") or ""
                         if cloud_md5 and last_sync and cloud_md5 != last_sync:

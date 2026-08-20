@@ -265,6 +265,7 @@ class Database:
     """Отслеживает статус каждого файла (скачан, изменён, только в облаке)."""
 
     def __init__(self, db_path: str = DB_PATH):
+        self._db_path = db_path
         self._conn = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
@@ -275,6 +276,11 @@ class Database:
                                    lambda s: s.lower() if s else s)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._read_conn = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
+        self._read_conn.row_factory = sqlite3.Row
+        self._read_conn.create_function("lower_utf8", 1,
+                                        lambda s: s.lower() if s else s)
+        self._read_conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
 
     def _init_schema(self):
@@ -778,6 +784,17 @@ class Database:
             return dict(row)
         return None
 
+    def get_files_batch(self, cloud_paths: list[str]) -> dict[str, dict]:
+        """Получить записи для списка путей — один запрос (read-only). Возвращает {path: row}."""
+        if not cloud_paths:
+            return {}
+        placeholders = ",".join("?" for _ in cloud_paths)
+        rows = self._read_conn.execute(
+            f"SELECT * FROM files WHERE cloud_path IN ({placeholders})",
+            cloud_paths
+        ).fetchall()
+        return {r["cloud_path"]: dict(r) for r in rows}
+
     def get_all_files(self) -> list[dict]:
         """Все отслеживаемые файлы."""
         with self._lock:
@@ -847,19 +864,19 @@ class Database:
         """
         prefix = folder_path.rstrip("/")
         pattern = prefix + "/%" if prefix else "/%"
-        with self._lock:
-            row = self._conn.execute("""
-                SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN status='downloaded' THEN 1 ELSE 0 END) as synced
-                FROM files
-                WHERE cloud_path LIKE ?
-                  AND cloud_path != ?
-                  AND type = 'file'
-            """, (pattern, folder_path)).fetchone()
+        row = self._read_conn.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status='downloaded' THEN 1 ELSE 0 END) as synced
+            FROM files
+            WHERE cloud_path LIKE ?
+              AND cloud_path != ?
+              AND type = 'file'
+        """, (pattern, folder_path)).fetchone()
         if not row or row["total"] == 0:
             # Пустая папка — проверяем её собственный статус
-            folder = self.get_file(folder_path)
+            with self._lock:
+                folder = self.get_file(folder_path)
             return folder is not None and folder["status"] == "downloaded"
         return row["total"] == row["synced"]
 
@@ -883,22 +900,20 @@ class Database:
                 return cached
         prefix = folder_path.rstrip("/")
         pattern = prefix + "/%" if prefix else "/%"
-        with self._lock:
-            rows = self._conn.execute("""
-                SELECT status, COUNT(*) as cnt FROM files
-                WHERE cloud_path LIKE ?
-                  AND cloud_path != ?
-                  AND type = 'file'
-                GROUP BY status
-            """, (pattern, folder_path)).fetchall()
+        rows = self._read_conn.execute("""
+            SELECT status, COUNT(*) as cnt FROM files
+            WHERE cloud_path LIKE ?
+              AND cloud_path != ?
+              AND type = 'file'
+            GROUP BY status
+        """, (pattern, folder_path)).fetchall()
         statuses = {r["status"]: r["cnt"] for r in rows}
         if not statuses:
             # Нет файлов — проверяем, есть ли запись самой папки (пустая папка)
-            with self._lock:
-                folder_row = self._conn.execute(
-                    "SELECT status FROM files WHERE cloud_path=? AND type='dir'",
-                    (folder_path,)
-                ).fetchone()
+            folder_row = self._read_conn.execute(
+                "SELECT status FROM files WHERE cloud_path=? AND type='dir'",
+                (folder_path,)
+            ).fetchone()
             result = folder_row["status"] if folder_row else "cloud_only"
         elif "deleting" in statuses:
             result = "deleting"
@@ -1015,8 +1030,7 @@ class Database:
             hi = fp.rstrip("/") + "0"
             params.extend([fp, lo, hi])
 
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        rows = self._read_conn.execute(sql, params).fetchall()
 
         # Группируем результаты: {folder: {status: count}}
         acc: dict[str, dict[str, int]] = {}
@@ -1115,6 +1129,17 @@ class Database:
                 "SELECT 1 FROM files WHERE cloud_path=?", (cloud_path,)
             ).fetchone()
         return row is not None
+
+    def file_exists_batch(self, cloud_paths: list[str]) -> set[str]:
+        """Проверить наличие записей для списка путей — один запрос (read-only)."""
+        if not cloud_paths:
+            return set()
+        placeholders = ",".join("?" for _ in cloud_paths)
+        rows = self._read_conn.execute(
+            f"SELECT cloud_path FROM files WHERE cloud_path IN ({placeholders})",
+            cloud_paths
+        ).fetchall()
+        return {r["cloud_path"] for r in rows}
 
     def get_by_local_path(self, local_path: str) -> Optional[dict]:
         """Найти запись по локальному пути."""

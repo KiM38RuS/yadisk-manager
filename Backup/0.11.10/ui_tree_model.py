@@ -159,6 +159,30 @@ class FolderTreeModel(QAbstractItemModel):
             return item._has_children
         return True  # не загружен → показываем стрелку, чтобы можно было развернуть
 
+    def _prefetch_sibling_statuses(self, item: FolderTreeItem):
+        """Batch-запрос статусов для всех незагруженных братьев item за один SQL.
+
+        Вызывается из data() при status is None — вместо N индивидуальных
+        LIKE-запросов (каждый ~100мс) делает один UNION ALL запрос
+        через get_folder_batch_aggregate_status.
+        """
+        parent = item.parent
+        if parent is None or parent is self._root or self._db is None:
+            return
+        unloaded = [c for c in parent.children
+                    if c.status is None and c is not self._visible_root]
+        if not unloaded:
+            return
+        folder_paths = [c.cloud_path for c in unloaded]
+        try:
+            batch = self._db.get_folder_batch_aggregate_status(
+                parent.cloud_path, folder_paths)
+            for child in unloaded:
+                child.status = batch.get(child.cloud_path, "cloud_only")
+        except Exception:
+            for child in unloaded:
+                child.status = "cloud_only"
+
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return None
@@ -176,27 +200,17 @@ class FolderTreeModel(QAbstractItemModel):
                 return item.cloud_path
             return None
         if role == Qt.DisplayRole:
-            status = item.status
-            if status is None and self._db is not None:
-                try:
-                    status = self._db.get_folder_aggregate_status(item.cloud_path)
-                    item.status = status
-                except Exception:
-                    status = None
+            if item.status is None and self._db is not None:
+                self._prefetch_sibling_statuses(item)
             return item.name
         if role == Qt.DecorationRole:
-            status = item.status
-            if status is None and self._db is not None:
-                try:
-                    status = self._db.get_folder_aggregate_status(item.cloud_path)
-                    item.status = status
-                except Exception:
-                    status = None
-            if status and status in STATUS_ICON:
-                if is_animated_status(status):
-                    return _rotated_svg_icon(STATUS_ICON[status], 20,
+            if item.status is None and self._db is not None:
+                self._prefetch_sibling_statuses(item)
+            if item.status and item.status in STATUS_ICON:
+                if is_animated_status(item.status):
+                    return _rotated_svg_icon(STATUS_ICON[item.status], 20,
                                              angle=get_rotation_angle())
-                return _svg_icon(STATUS_ICON[status], 20)
+                return _svg_icon(STATUS_ICON[item.status], 20)
             return None
         if role == Qt.UserRole:
             return item.cloud_path

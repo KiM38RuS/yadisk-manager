@@ -340,19 +340,33 @@ class FileTableModel(QAbstractTableModel):
     def refresh_statuses(self):
         """Обновить статусы всех элементов модели из БД (без API-запросов).
 
-        Для папок используется get_folder_aggregate_status,
+        Для папок используется get_folder_batch_aggregate_status (один запрос),
         для файлов — прямой запрос get_file().
         Эмитит dataChanged только для строк, где статус изменился.
         """
+        dir_paths = []
+        dir_indices = []
+        for i, item in enumerate(self._items):
+            if item.get("is_parent_nav"):
+                continue
+            if item.get("is_dir"):
+                dir_paths.append(item["cloud_path"])
+                dir_indices.append(i)
+
+        batch_statuses = {}
+        if dir_paths:
+            parent = self._current_path or "/"
+            batch_statuses = self._db.get_folder_batch_aggregate_status(
+                parent, dir_paths)
+
         changed_rows: list[int] = []
         for i, item in enumerate(self._items):
             if item.get("is_parent_nav"):
                 continue
             cloud_path = item["cloud_path"]
-            is_dir = item.get("is_dir", False)
             old_status = self._items[i]["status"]
-            if is_dir:
-                new_status = self._db.get_folder_aggregate_status(cloud_path)
+            if item.get("is_dir"):
+                new_status = batch_statuses.get(cloud_path, "cloud_only")
             else:
                 db_file = self._db.get_file(cloud_path)
                 new_status = db_file["status"] if db_file else "cloud_only"
