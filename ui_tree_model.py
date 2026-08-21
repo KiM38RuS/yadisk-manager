@@ -34,6 +34,8 @@ class FolderTreeItem:
         self.children: list["FolderTreeItem"] = []
         self.loaded = False
         self._has_children = True  # assume has children until proven otherwise
+        self.db_loaded = False    # дети получены из SQLite (мгновенно)
+        self.arrow_known = False  # наличие подпапок известно из БД (точная стрелка)
         self.status = status  # cached folder aggregate status
 
     def child(self, row: int):
@@ -101,6 +103,39 @@ class FolderTreeModel(QAbstractItemModel):
             parent_item.children.append(child)
         self.endInsertRows()
 
+    def populate_children_from_db(self, cloud_path: str, folders: list[dict],
+                                  with_subdirs: set[str]) -> None:
+        """Мгновенно вставить детей из SQLite (вызов только из главного потока).
+
+        Узел получает db_loaded=True: дети и стрелки видны сразу, без API.
+        API-сверка досинхронизируется позже через merge_children_from_api().
+        Повторный вызов — no-op.
+        """
+        parent_item = self._find_item(cloud_path)
+        if not parent_item or parent_item.loaded or parent_item.db_loaded:
+            return
+        parent_item.db_loaded = True
+        parent_item._has_children = len(folders) > 0
+        if not folders:
+            return
+        parent_index = self._index_of(parent_item)
+        self.beginInsertRows(parent_index, 0, len(folders) - 1)
+        if self._db is not None:
+            folder_paths = [f["path"] for f in folders]
+            batch_statuses = self._db.get_folder_batch_aggregate_status(
+                cloud_path, folder_paths)
+        else:
+            batch_statuses = {}
+        for f in folders:
+            child = FolderTreeItem(
+                name=f["name"], cloud_path=f["path"], parent=parent_item)
+            child.status = batch_statuses.get(f["path"], "cloud_only")
+            # Точная стрелка из БД: знаем, есть ли у ребёнка свои подпапки
+            child._has_children = f["path"] in with_subdirs
+            child.arrow_known = True
+            parent_item.children.append(child)
+        self.endInsertRows()
+
     def _find_item(self, cloud_path: str) -> FolderTreeItem | None:
         """Поиск узла по cloud_path (рекурсивно)."""
         if cloud_path == "/":
@@ -151,13 +186,20 @@ class FolderTreeModel(QAbstractItemModel):
         return 1
 
     def hasChildren(self, parent: QModelIndex = QModelIndex()) -> bool:
-        """True для не загруженных (стрелка есть), для загруженных — только если есть подпапки."""
+        """True если у узла должны быть дети (рисуется стрелка раскрытия).
+
+        Приоритет источников: API-сверка > знание из БД > оптимистичное True.
+        """
         if not parent.isValid():
             return True
         item: FolderTreeItem = parent.internalPointer()
         if item.loaded:
             return item._has_children
-        return True  # не загружен → показываем стрелку, чтобы можно было развернуть
+        if item.db_loaded:
+            return len(item.children) > 0
+        if item.arrow_known:
+            return item._has_children
+        return True  # ничего не знаем → показываем стрелку
 
     def _prefetch_sibling_statuses(self, item: FolderTreeItem):
         """Batch-запрос статусов для всех незагруженных братьев item за один SQL.
