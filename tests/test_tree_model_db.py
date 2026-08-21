@@ -16,12 +16,7 @@ def qapp():
 @pytest.fixture
 def model(qapp, populated_db):
     from ui_tree_model import FolderTreeModel
-    # Девиация от плана: Database(":memory:") создаёт ДВА независимых
-    # in-memory соединения (_conn и _read_conn), поэтому batch-запрос
-    # статусов через _read_conn не видел таблицу files. Сводим соединения
-    # к одному только для тестов (в проде путь файловый — там всё ок).
-    # Правильный фикс — в conftest.in_memory_db, вынесен отдельным пунктом.
-    populated_db._read_conn = populated_db._conn
+    # Соединения _conn/_read_conn уже сведены в conftest.in_memory_db
     # Корень «Яндекс Диск» существует сразу после __init__ (visible_root);
     # НЕ вызываем populate_children — он пометил бы корень loaded=True
     return FolderTreeModel(None, populated_db)

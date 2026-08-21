@@ -258,6 +258,11 @@ def in_memory_db():
     database = db.Database(":memory:")
     # Ensure in-memory schema is created
     database._init_schema()
+    # Database(":memory:") открывает ДВА независимых in-memory соединения
+    # (_conn и _read_conn) — каждое :memory:-соединение живёт в своём мире,
+    # поэтому записи через _conn невидимы для SELECT через _read_conn.
+    # В проде оба смотрят на один файл (WAL), здесь сводим их вручную.
+    database._read_conn = database._conn
     yield database
     database.close()
 
