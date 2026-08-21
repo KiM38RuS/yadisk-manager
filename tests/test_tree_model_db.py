@@ -85,6 +85,8 @@ def test_merge_adds_and_removes(model):
     assert names == {"Документы", "Фото", "Новая"}
     assert model._find_item("/Музыка") is None
     assert model._find_item("/Новая") is not None
+    # Статусы проставлены и оставшимся, и новым детям (batch-запрос)
+    assert all(c.status for c in item.children)
 
 
 def test_merge_skips_non_db_nodes(model):
