@@ -53,6 +53,11 @@ def test_levels_percent_name_not_wildcard(populated_db):
          "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
         {"path": "/100%/подпапка", "name": "подпапка", "type": "dir",
          "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+        # Ловушка: без экранирования '%' совпал бы с 'X' и вернул /100Xdecoy/trap
+        {"path": "/100Xdecoy", "name": "100Xdecoy", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+        {"path": "/100Xdecoy/trap", "name": "trap", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
     ])
     folders, subs = populated_db.get_dir_tree_levels("/100%")
     assert [f["path"] for f in folders] == ["/100%/подпапка"]
