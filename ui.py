@@ -3681,11 +3681,15 @@ class MainWindow(QMainWindow):
         API-сверка каждого раскрытого узла запускается в фоне и не
         блокирует ходок.
         """
+        # Токен поколения: навигация во время хода инвалидирует колбэки
+        # предыдущего хода (иначе поздний ответ выделит устаревшую цель)
+        self._tree_sync_gen = getattr(self, "_tree_sync_gen", 0) + 1
+        gen = self._tree_sync_gen
         self._tree_sync_queue = self._ancestor_paths(path)
         self._tree_sync_target = path
-        self._tree_sync_step()
+        self._tree_sync_step(gen)
 
-    def _tree_sync_step(self):
+    def _tree_sync_step(self, gen: int):
         while self._tree_sync_queue:
             p = self._tree_sync_queue.pop(0)
             item = self.tree_model._find_item(p)
@@ -3698,8 +3702,8 @@ class MainWindow(QMainWindow):
                     break
                 t = DbChildrenThread(self._db, parent_p, self)
                 t.finished.connect(
-                    lambda folders, subs, err, pp=parent_p:
-                        self._on_db_children_for_sync(pp, folders, subs, err))
+                    lambda folders, subs, err, pp=parent_p, g=gen:
+                        self._on_db_children_for_sync(pp, folders, subs, err, g))
                 t.finished.connect(t.deleteLater)
                 self._active_threads.append(t)
                 t.finished.connect(lambda: self._cleanup_thread(t))
@@ -3714,8 +3718,17 @@ class MainWindow(QMainWindow):
                         self._on_tree_children_loaded(items, err, cp))
         self._tree_sync_finish()
 
-    def _on_db_children_for_sync(self, parent_path, folders, has_subdirs, error):
-        """Дети из БД получены — вставить и продолжить ходок."""
+    def _on_db_children_for_sync(self, parent_path, folders, has_subdirs, error,
+                                 gen: int = -1):
+        """Дети из БД получены — вставить и продолжить ходок.
+
+        gen: токен поколения; если ходок уже перезапущен новой навигацией,
+        устаревший ответ игнорируется (кроме gen=-1 из старых вызовов/тестов).
+        """
+        if gen != -1 and gen != getattr(self, "_tree_sync_gen", 0):
+            logger.debug("Tree sync: stale DB response for %s (gen %d)",
+                         parent_path, gen)
+            return
         if error:
             logger.warning("Tree sync DB fetch failed for %s: %s",
                            parent_path, error)
@@ -3723,7 +3736,7 @@ class MainWindow(QMainWindow):
             return
         self.tree_model.populate_children_from_db(
             parent_path, folders, has_subdirs)
-        self._tree_sync_step()
+        self._tree_sync_step(gen)
 
     def _tree_sync_finish(self):
         """Выделить целевой узел дерева (без очистки таблицы)."""

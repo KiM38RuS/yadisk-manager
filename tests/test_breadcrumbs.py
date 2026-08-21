@@ -167,7 +167,7 @@ def test_tree_sync_step_expands_existing(qapp):
     mw._tree_sync_target = "/A/B"
     mw.tree_model._find_item.side_effect = lambda p: SimpleNamespace(loaded=True)
 
-    ui_mod.MainWindow._tree_sync_step(mw)
+    ui_mod.MainWindow._tree_sync_step(mw, 1)
 
     assert mw._tree_sync_queue == []            # очередь исчерпана
     assert mw.tree_view.expand.call_count == 3  # каждый узел раскрыт
@@ -201,7 +201,7 @@ def test_tree_sync_step_fetches_db_children(qapp, monkeypatch):
     mw.tree_model._find_item.side_effect = \
         lambda p: SimpleNamespace(loaded=False, db_loaded=False) if p == "/" else None
 
-    ui_mod.MainWindow._tree_sync_step(mw)
+    ui_mod.MainWindow._tree_sync_step(mw, 1)
 
     assert created == ["/"]                # дети корня запрошены из БД
     assert mw._tree_sync_queue == ["/A/B"]  # очередь заморожена до колбэка
@@ -224,3 +224,16 @@ def test_tree_sync_db_children_callback(qapp):
     ui_mod.MainWindow._on_db_children_for_sync(mw2, "/", [], set(), "db error")
     mw2.tree_model.populate_children_from_db.assert_not_called()
     mw2._tree_sync_finish.assert_called_once()
+
+
+def test_tree_sync_stale_gen_ignored(qapp):
+    """Ответ от предыдущего хода (gen устарел) полностью игнорируется."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._tree_sync_gen = 2  # уже шёл новый ходок
+    ui_mod.MainWindow._on_db_children_for_sync(mw, "/", [], set(), "", 1)
+    mw.tree_model.populate_children_from_db.assert_not_called()
+    mw._tree_sync_step.assert_not_called()
+    mw._tree_sync_finish.assert_not_called()
