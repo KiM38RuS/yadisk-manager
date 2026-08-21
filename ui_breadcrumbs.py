@@ -6,10 +6,7 @@ BreadcrumbBar — адресная строка с хлебными крошка
 с выпадающим меню скрытых предков (как в Проводнике Windows).
 """
 
-import logging
-
-from PySide6.QtCore import Qt, QEvent, Signal
-from PySide6.QtCore import QStringListModel
+from PySide6.QtCore import Qt, QEvent, Signal, QStringListModel
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCompleter, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizePolicy,
@@ -17,8 +14,6 @@ from PySide6.QtWidgets import (
 )
 
 from ui_shared import normalize_cloud_path
-
-logger = logging.getLogger("ui.breadcrumbs")
 
 
 def compute_overflow(total_width: int, available: int,
@@ -60,6 +55,10 @@ class BreadcrumbBar(QWidget):
         super().__init__(parent)
         self._path = "/"
         self._segments: list[tuple[str, str]] = []
+        self._editing = False
+        # Кеш метрик последней сборки (для пропуска лишних rebuild при resize)
+        self._widths_cache: tuple[int, list[int]] | None = None
+        self._last_hidden = 0
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(4, 2, 4, 2)
@@ -86,14 +85,19 @@ class BreadcrumbBar(QWidget):
     # ── публичный API ──────────────────────────────────────
 
     def set_path(self, path: str) -> None:
-        """Отобразить путь крошками (вызывать при каждой навигации)."""
+        """Отобразить путь крошками (вызывать при каждой навигации).
+
+        Закрывает режим ввода: внешняя навигация (дерево/таблица)
+        всегда важнее открытого редактора с устаревшим путём.
+        """
+        self.cancel_edit()
         self._path = normalize_cloud_path(path)
         self._segments = self._split_segments(self._path)
-        if not self._editor.isVisible():
-            self._rebuild()
+        self._rebuild()
 
     def show_editor(self) -> None:
         """Режим ввода: скрыть крошки, показать QLineEdit с полным путём."""
+        self._editing = True
         self._crumbs.hide()
         self._editor.show()
         self._editor.setText(self._path)
@@ -111,7 +115,7 @@ class BreadcrumbBar(QWidget):
         """Подменить модель автодополнения (список папок из БД)."""
         completer = QCompleter(model, self)
         completer.setCaseSensitivity(Qt.CaseInsensitive)
-        # Режимы взаимоисключающие; побитовое «или» в PySide6 кидает TypeError
+        # PopupCompletion: PySide6 не поддерживает «|» для CompletionMode
         completer.setCompletionMode(QCompleter.PopupCompletion)
         self._editor.setCompleter(completer)
 
@@ -166,6 +170,8 @@ class BreadcrumbBar(QWidget):
         total = sum(widths) + seps_w
         avail = max(80, self._crumbs.width() - 8)
         hidden = compute_overflow(total, avail, widths)
+        self._widths_cache = (total, widths)
+        self._last_hidden = hidden
 
         if hidden > 0 and n > 2:
             dots = QToolButton()
@@ -192,23 +198,35 @@ class BreadcrumbBar(QWidget):
     def _on_edit_done(self) -> None:
         """Enter в редакторе: нормализовать путь и сообщить о навигации."""
         raw = self._editor.text()
-        self._cancel_edit()
+        self.cancel_edit()
         self.navigate.emit(normalize_cloud_path(raw))
 
-    def _cancel_edit(self) -> None:
-        """Esc: вернуть крошки без навигации."""
-        self._editor.hide()
-        self._crumbs.show()
-        self._rebuild()
+    def cancel_edit(self) -> None:
+        """Выйти из режима ввода без навигации (Esc или внешняя навигация)."""
+        if self._editing:
+            self._editing = False
+            self._editor.hide()
+            self._crumbs.show()
+            self._rebuild()
 
     def eventFilter(self, obj, event):
         if obj is self._editor and event.type() == QEvent.KeyPress \
                 and event.key() == Qt.Key_Escape:
-            self._cancel_edit()
+            self.cancel_edit()
             return True
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        if not self._editor.isVisible():
+        if self._editing:
+            return
+        # Ширина _crumbs ещё не обновлена внутри resizeEvent — считаем
+        # доступную ширину из события (минус поля 4+4), иначе отстаём на тик.
+        avail = max(80, ev.size().width() - 16)
+        if self._widths_cache is None:
+            self._rebuild()
+            return
+        total, widths = self._widths_cache
+        hidden = compute_overflow(total, avail, widths)
+        if hidden != self._last_hidden:
             self._rebuild()
