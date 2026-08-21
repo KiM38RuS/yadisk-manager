@@ -279,10 +279,13 @@ def _local_path(cloud_path: str) -> str:
 
 
 def normalize_cloud_path(path: str) -> str:
-    """Нормализовать облачный путь: ведущий '/', без хвостовых и двойных слэшей."""
+    """Нормализовать облачный путь: ведущий '/', без хвостовых и двойных слэшей.
+
+    Обратные слэши (вставка пути из Проводника Windows) заменяются на прямые.
+    """
     if not path:
         return "/"
-    path = path.strip()
+    path = path.strip().replace("\\", "/")
     if not path:
         return "/"
     if not path.startswith("/"):

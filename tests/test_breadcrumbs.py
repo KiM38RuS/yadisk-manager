@@ -16,8 +16,16 @@ def qapp():
 def test_normalize_basic():
     from ui_shared import normalize_cloud_path
     assert normalize_cloud_path("/Загрузки/Отчёты/") == "/Загрузки/Отчёты"
+    assert normalize_cloud_path("/Загрузки/Отчёты") == "/Загрузки/Отчёты"  # канонический passthrough
     assert normalize_cloud_path("//a///b//") == "/a/b"
     assert normalize_cloud_path("") == "/"
     assert normalize_cloud_path("   ") == "/"
     assert normalize_cloud_path("relative/path") == "/relative/path"
     assert normalize_cloud_path("/") == "/"
+
+
+def test_normalize_backslashes():
+    """Вставка пути из Проводника Windows: '\\' → '/'."""
+    from ui_shared import normalize_cloud_path
+    assert normalize_cloud_path("Документы\\Фото\\2024") == "/Документы/Фото/2024"
+    assert normalize_cloud_path("\\\\a\\b\\") == "/a/b"
