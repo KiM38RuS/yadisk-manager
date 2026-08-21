@@ -90,3 +90,35 @@ def test_dir_paths_thread_run(populated_db):
     t.run()
     assert result["err"] == ""
     assert "/Фото/2024" in result["paths"]
+
+
+def test_db_children_thread_error(populated_db):
+    """Ошибка БД → пустой результат + непустой err (контракт except-ветки)."""
+    from ui_threads import DbChildrenThread
+
+    class Boom:
+        def get_dir_tree_levels(self, path):
+            raise RuntimeError("db is gone")
+
+    result = {}
+    t = DbChildrenThread(Boom(), "/")
+    t.finished.connect(lambda f, s, e: result.update(folders=f, subs=s, err=e))
+    t.run()
+    assert result["folders"] == []
+    assert result["subs"] == set()
+    assert "db is gone" in result["err"]
+
+
+def test_dir_paths_thread_error():
+    from ui_threads import DirPathsThread
+
+    class Boom:
+        def get_all_dir_paths(self):
+            raise RuntimeError("boom")
+
+    result = {}
+    t = DirPathsThread(Boom())
+    t.finished.connect(lambda p, e: result.update(paths=p, err=e))
+    t.run()
+    assert result["paths"] == []
+    assert "boom" in result["err"]
