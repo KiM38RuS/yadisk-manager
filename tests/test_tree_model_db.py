@@ -49,3 +49,19 @@ def test_populate_twice_is_noop(model):
     model.populate_children_from_db("/", folders, subs)
     model.populate_children_from_db("/", folders, subs)  # второй вызов — no-op
     assert model.rowCount(model.index(0, 0)) == 3
+
+
+def test_api_populate_after_db_is_blocked(model):
+    """API-результат для DB-заполненного узла не дублирует детей (до Task 4)."""
+    folders, subs = model._db.get_dir_tree_levels("/")
+    model.populate_children_from_db("/", folders, subs)
+    api_items = [
+        {"name": "Документы", "path": "/Документы", "type": "dir"},
+        {"name": "Музыка", "path": "/Музыка", "type": "dir"},
+        {"name": "Фото", "path": "/Фото", "type": "dir"},
+        {"name": "Заметки.txt", "path": "/Заметки.txt", "type": "file"},
+    ]
+    model.populate_children("/", api_items)  # должен быть no-op
+    assert model.rowCount(model.index(0, 0)) == 3
+    root = model._find_item("/")
+    assert root.loaded is False  # guard сработал до установки loaded

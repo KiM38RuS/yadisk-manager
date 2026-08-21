@@ -76,7 +76,9 @@ class FolderTreeModel(QAbstractItemModel):
     def populate_children(self, cloud_path: str, items: list[dict]) -> None:
         """Асинхронно добавить children узлу (из главного потока)."""
         parent_item = self._find_item(cloud_path)
-        if not parent_item or parent_item.loaded:
+        # db_loaded тоже блокируем: пока нет merge_children_from_api (Task 4),
+        # повторное API-наполнение задублировало бы детей DB-заполнения
+        if not parent_item or parent_item.loaded or parent_item.db_loaded:
             return
         parent_item.loaded = True
         folders = [it for it in items if it.get("type") == "dir"]
