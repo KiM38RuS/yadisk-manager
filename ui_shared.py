@@ -278,6 +278,20 @@ def _local_path(cloud_path: str) -> str:
     return os.path.join(_cache_dir(), clean.lstrip("/"))
 
 
+def normalize_cloud_path(path: str) -> str:
+    """Нормализовать облачный путь: ведущий '/', без хвостовых и двойных слэшей."""
+    if not path:
+        return "/"
+    path = path.strip()
+    if not path:
+        return "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    while "//" in path:
+        path = path.replace("//", "/")
+    return path.rstrip("/") or "/"
+
+
 def _icon_for(name: str, is_dir: bool = False) -> str:
     if is_dir:
         return ICONS["folder"]
