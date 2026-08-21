@@ -27,6 +27,9 @@ from urllib.parse import quote
 import requests
 import urllib3.exceptions
 from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.poolmanager import PoolManager
 
 logger = logging.getLogger("net_heal")
 
@@ -230,3 +233,108 @@ class DoHResolver:
             logger.info("DoH %s: %s -> %s (ttl=%ss)", base, host, ips, ttl)
             return ips, ttl
         raise NetBlockError(NetIssue.DnsBlocked, host) from last_exc
+
+
+# ── адаптер с обходом ────────────────────────────────────
+
+
+class HealState:
+    """Общее состояние обхода: его публикует HealedAdapter,
+    читают соединения пула (из любых воркер-потоков)."""
+
+    def __init__(self):
+        self.cache = IpCache()
+        self.resolver = DoHResolver()
+        self.enabled_fn: Callable[[], bool] = lambda: False
+
+
+STATE = HealState()
+
+
+class HealedHTTPSConnection(HTTPSConnection):
+    """HTTPSConnection с фолбэком резолвинга через IpCache/DoH.
+
+    Системный DNS всегда первый. При его отказе (и включённом обходе)
+    сокет открывается на IP: временно подменяем _dns_host (по нему
+    urllib3 делает create_connection), в finally возвращаем исходное —
+    тогда SNI и проверка сертификата остаются на имени хоста (self.host).
+    """
+
+    def _new_conn(self):
+        if self.proxy is not None:
+            # Прокси-трафик не хилим: сокет идёт на прокси, не на origin.
+            return super()._new_conn()
+        host = self.host
+        try:
+            return super()._new_conn()
+        except Exception as exc:
+            kind = classify_error(exc)
+            if kind is None:
+                raise
+            first_exc = exc  # имя `exc` удалится в конце except-блока
+        logger.info("System path to %s failed (%s), heal=%s",
+                    host, kind.value, STATE.enabled_fn())
+        if not STATE.enabled_fn():
+            self._give_up(kind, host, cause=first_exc)
+        ips = STATE.cache.get(host)
+        if not ips:
+            try:
+                ips, ttl = STATE.resolver.resolve(host)
+            except NetBlockError as doh_err:
+                self._give_up(kind, host, cause=doh_err)
+            STATE.cache.put(host, ips, ttl)
+        last_exc = first_exc
+        for ip in ips:
+            self._dns_host = ip
+            try:
+                return super()._new_conn()
+            except (OSError, urllib3.exceptions.HTTPError) as conn_err:
+                logger.info("IP %s unreachable for %s (%s)", ip, host, conn_err)
+                last_exc = conn_err
+                STATE.cache.mark_bad(host, ip)
+            finally:
+                self._dns_host = host
+        self._give_up(kind, host, cause=last_exc)
+
+    @staticmethod
+    def _give_up(kind: NetIssue, host: str,
+                 cause: BaseException) -> NoReturn:
+        """Записать событие для UI и бросить типизированную ошибку."""
+        record_block_event(kind, host)
+        raise NetBlockError(kind, host) from cause
+
+
+class _HealedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = HealedHTTPSConnection
+
+
+class _HealedPoolManager(PoolManager):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # urllib3 2.x затирает pool_classes_by_scheme из модульной константы
+        # (poolmanager.py:227), класс-атрибут не работает — задаём на инстансе.
+        self.pool_classes_by_scheme = {
+            "http": HTTPConnectionPool,
+            "https": _HealedHTTPSConnectionPool,
+        }
+
+
+class HealedAdapter(HTTPAdapter):
+    """HTTPAdapter с обходом DNS/TCP-блокировок.
+
+    Монтируется на https:// вместо стандартного адаптера. Настройки
+    обхода публикует в net_heal.STATE — их читают соединения пула.
+    enabled_fn вызывается при каждом сбое, поэтому ручное переключение
+    чекбокса в настройках действует сразу, без пересоздания сессии.
+    """
+
+    def __init__(self, *args, enabled_fn=None, cache=None, resolver=None,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        STATE.enabled_fn = enabled_fn or (lambda: False)
+        STATE.cache = cache or IpCache()
+        STATE.resolver = resolver or DoHResolver()
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs.setdefault("block", False)
+        self.poolmanager = _HealedPoolManager(*args, **kwargs)

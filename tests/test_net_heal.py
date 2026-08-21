@@ -297,3 +297,202 @@ class TestDoHResolver:
         ips, _ = resolver.resolve("h.test")
         assert ips == ["1.1.1.1"]
         assert len(session.calls) == 2
+
+
+@pytest.fixture(autouse=True)
+def _clear_events():
+    """Очередь событий net_heal — общая на модуль; чистим после каждого теста."""
+    yield
+    drain_block_events()
+
+
+@pytest.fixture
+def heal_state():
+    """Чистый STATE + стаб-резолвер на каждый тест."""
+    from net_heal import HealState, IpCache
+    saved = net_heal.STATE
+    state = HealState()
+    state.cache = IpCache()
+    net_heal.STATE = state
+    yield state
+    net_heal.STATE = saved
+
+
+class StubResolver:
+    def __init__(self, result=None, exc=None):
+        self.result = result or ([], 60)
+        self.exc = exc
+        self.calls: list[str] = []
+
+    def resolve(self, host):
+        self.calls.append(host)
+        if self.exc:
+            raise self.exc
+        return self.result
+
+
+class TestHealedConnection:
+    def _conn(self, host="blocked.test"):
+        return net_heal.HealedHTTPSConnection(host=host)
+
+    def test_system_dns_first_then_cached_ip(self, heal_state, monkeypatch):
+        """1-й вызов — системный DNS (падает), 2-й — коннект на IP из кэша."""
+        heal_state.enabled_fn = lambda: True
+        heal_state.resolver = StubResolver(result=(["93.184.216.34"], 300))
+        calls = []
+
+        def fake_new_conn(self):
+            # urllib3 2.x: host — property над _dns_host, во время подмены
+            # .host читает IP; оригинал гарантируется восстановлением в finally
+            # (см. TestSniPreserved).
+            calls.append(self._dns_host)
+            if len(calls) == 1:
+                raise _nre(self.host)
+            return object()  # sentinel «сокет»
+
+        monkeypatch.setattr(urllib3.connection.HTTPConnection,
+                            "_new_conn", fake_new_conn)
+        conn = self._conn()
+        sock = conn._new_conn()
+        assert isinstance(sock, object)
+        assert calls[0] == "blocked.test"   # системный DNS
+        assert calls[1] == "93.184.216.34"  # коннект на IP
+        # подмена _dns_host откатана — последующие операции видят хост
+        assert conn._dns_host == "blocked.test"
+        # IP попал в кэш
+        assert heal_state.cache.get("blocked.test") == ["93.184.216.34"]
+
+    def test_disabled_flag_raises_immediately_and_records_event(
+            self, heal_state, monkeypatch):
+        heal_state.enabled_fn = lambda: False
+        heal_state.resolver = StubResolver(result=(["1.1.1.1"], 60))
+        monkeypatch.setattr(urllib3.connection.HTTPConnection, "_new_conn",
+                            lambda self: (_ for _ in ()).throw(_nre()))
+        conn = self._conn()
+        with pytest.raises(NetBlockError) as ei:
+            conn._new_conn()
+        assert ei.value.kind == NetIssue.DnsBlocked
+        assert ei.value.host == "blocked.test"
+        events = drain_block_events()
+        assert len(events) == 1
+        assert events[0][1] == NetIssue.DnsBlocked
+        # DoH даже не дёргали
+        assert heal_state.resolver.calls == []
+
+    def test_unclassified_error_passes_through(self, heal_state, monkeypatch):
+        heal_state.enabled_fn = lambda: True
+        ssl_err = req_exc.SSLError("cert verify failed")
+        monkeypatch.setattr(urllib3.connection.HTTPConnection, "_new_conn",
+                            lambda self: (_ for _ in ()).throw(ssl_err))
+        conn = self._conn()
+        with pytest.raises(req_exc.SSLError):
+            conn._new_conn()
+        assert drain_block_events() == []
+
+    def test_all_ips_bad_raises_and_marks(self, heal_state, monkeypatch):
+        heal_state.enabled_fn = lambda: True
+        heal_state.resolver = StubResolver(result=(["1.1.1.1", "2.2.2.2"], 300))
+
+        attempts = []
+
+        def fake_new_conn(self):
+            # 1-й вызов — системный DNS, далее — попытки по IP из кэша.
+            attempts.append(self._dns_host)
+            if len(attempts) == 1:
+                raise _nre(self.host)
+            raise ConnectionResetError("reset")
+
+        monkeypatch.setattr(urllib3.connection.HTTPConnection,
+                            "_new_conn", fake_new_conn)
+        conn = self._conn()
+        with pytest.raises(NetBlockError) as ei:
+            conn._new_conn()
+        assert ei.value.kind == NetIssue.DnsBlocked
+        assert heal_state.cache.get("blocked.test") == []  # оба помечены плохими
+        kinds = [k for _t, k, _h in drain_block_events()]
+        assert kinds == [NetIssue.DnsBlocked]
+
+    def test_doh_dead_gives_up_with_original_kind(self, heal_state,
+                                                  monkeypatch):
+        heal_state.enabled_fn = lambda: True
+        heal_state.resolver = StubResolver(exc=NetBlockError(
+            NetIssue.DnsBlocked, "blocked.test"))
+        monkeypatch.setattr(urllib3.connection.HTTPConnection, "_new_conn",
+                            lambda self: (_ for _ in ()).throw(_nre()))
+        conn = self._conn()
+        with pytest.raises(NetBlockError):
+            conn._new_conn()
+
+    def test_tcp_blocked_kind_preserved(self, heal_state, monkeypatch):
+        heal_state.enabled_fn = lambda: False
+        monkeypatch.setattr(urllib3.connection.HTTPConnection, "_new_conn",
+                            lambda self: (_ for _ in ())
+                            .throw(ConnectionResetError()))
+        conn = self._conn()
+        with pytest.raises(NetBlockError) as ei:
+            conn._new_conn()
+        assert ei.value.kind == NetIssue.TcpBlocked
+
+    def test_proxy_traffic_not_healed(self, heal_state, monkeypatch):
+        heal_state.enabled_fn = lambda: True
+        heal_state.resolver = StubResolver(result=(["1.1.1.1"], 60))
+        monkeypatch.setattr(urllib3.connection.HTTPConnection, "_new_conn",
+                            lambda self: (_ for _ in ()).throw(_nre()))
+        conn = self._conn()
+        conn.proxy = "http://proxy.local:3128"
+        with pytest.raises(ue.NameResolutionError):
+            conn._new_conn()
+        assert heal_state.resolver.calls == []
+
+
+class TestSniPreserved:
+    def _conn(self, host="blocked.test"):
+        return net_heal.HealedHTTPSConnection(host=host)
+
+    def test_wrap_socket_gets_original_hostname(self, heal_state, monkeypatch):
+        """Полный connect(): wrap_socket получает server_hostname=исходный хост,
+        хотя сокет открыт на IP из кэша."""
+        captured = {}
+
+        def fake_wrap(*args, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(socket=MagicMock(), is_verified=True)
+
+        monkeypatch.setattr(urllib3.connection,
+                            "_ssl_wrap_socket_and_match_hostname", fake_wrap)
+        monkeypatch.setattr(urllib3.connection.http2_probe,
+                            "acquire_and_get", lambda **kw: True)
+
+        first_attempt = []
+
+        def fake_new_conn(self):
+            if not first_attempt:
+                # 1-й вызов — системный DNS по имени; далее — попытки по IP.
+                first_attempt.append(self._dns_host)
+                raise _nre(self.host)
+            return MagicMock()  # «сокет», подключённый к IP
+
+        monkeypatch.setattr(urllib3.connection.HTTPConnection,
+                            "_new_conn", fake_new_conn)
+        heal_state.enabled_fn = lambda: True
+        heal_state.resolver = StubResolver(result=(["93.184.216.34"], 300))
+        conn = self._conn()
+        conn.connect()
+        assert captured["server_hostname"] == "blocked.test"
+
+
+class TestHealedAdapterWiring:
+    def test_adapter_uses_healed_pool_for_https(self, heal_state):
+        adapter = net_heal.HealedAdapter(pool_connections=2, pool_maxsize=2)
+        pool = adapter.poolmanager.connection_from_url("https://x.test/")
+        assert isinstance(pool, net_heal._HealedHTTPSConnectionPool)
+        assert pool.ConnectionCls is net_heal.HealedHTTPSConnection
+
+    def test_adapter_publishes_state(self, heal_state):
+        cache = net_heal.IpCache()
+        resolver = StubResolver()
+        fn = lambda: True  # noqa: E731
+        net_heal.HealedAdapter(enabled_fn=fn, cache=cache, resolver=resolver)
+        assert net_heal.STATE.enabled_fn is fn
+        assert net_heal.STATE.cache is cache
+        assert net_heal.STATE.resolver is resolver
