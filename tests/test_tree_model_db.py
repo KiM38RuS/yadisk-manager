@@ -51,8 +51,8 @@ def test_populate_twice_is_noop(model):
     assert model.rowCount(model.index(0, 0)) == 3
 
 
-def test_api_populate_after_db_is_blocked(model):
-    """API-результат для DB-заполненного узла не дублирует детей (до Task 4)."""
+def test_api_populate_after_db_delegates_to_merge(model):
+    """populate_children для db_loaded-узла делегирует merge: без дублей."""
     folders, subs = model._db.get_dir_tree_levels("/")
     model.populate_children_from_db("/", folders, subs)
     api_items = [
@@ -61,7 +61,35 @@ def test_api_populate_after_db_is_blocked(model):
         {"name": "Фото", "path": "/Фото", "type": "dir"},
         {"name": "Заметки.txt", "path": "/Заметки.txt", "type": "file"},
     ]
-    model.populate_children("/", api_items)  # должен быть no-op
-    assert model.rowCount(model.index(0, 0)) == 3
+    model.populate_children("/", api_items)  # мержит, а не дублирует
+    assert model.rowCount(model.index(0, 0)) == 3  # файл отфильтрован, дублей нет
     root = model._find_item("/")
-    assert root.loaded is False  # guard сработал до установки loaded
+    assert root.loaded is True   # API-сверка проведена через merge
+
+
+def test_merge_adds_and_removes(model):
+    folders, subs = model._db.get_dir_tree_levels("/")
+    model.populate_children_from_db("/", folders, subs)
+
+    # Облако: Музыка удалена, появилась Новая
+    api_items = [
+        {"path": "/Документы", "name": "Документы", "type": "dir"},
+        {"path": "/Фото", "name": "Фото", "type": "dir"},
+        {"path": "/Новая", "name": "Новая", "type": "dir"},
+    ]
+    model.merge_children_from_api("/", api_items)
+
+    item = model._find_item("/")
+    assert item.loaded is True           # API-сверка проведена
+    names = {c.name for c in item.children}
+    assert names == {"Документы", "Фото", "Новая"}
+    assert model._find_item("/Музыка") is None
+    assert model._find_item("/Новая") is not None
+
+
+def test_merge_skips_non_db_nodes(model):
+    """Для узла без db_loaded merge — no-op (обслуживает populate_children)."""
+    model.merge_children_from_api("/", [
+        {"path": "/X", "name": "X", "type": "dir"},
+    ])
+    assert model._find_item("/X") is None

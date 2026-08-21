@@ -76,9 +76,11 @@ class FolderTreeModel(QAbstractItemModel):
     def populate_children(self, cloud_path: str, items: list[dict]) -> None:
         """Асинхронно добавить children узлу (из главного потока)."""
         parent_item = self._find_item(cloud_path)
-        # db_loaded тоже блокируем: пока нет merge_children_from_api (Task 4),
-        # повторное API-наполнение задублировало бы детей DB-заполнения
-        if not parent_item or parent_item.loaded or parent_item.db_loaded:
+        if not parent_item or parent_item.loaded:
+            return
+        # Узел уже наполнен из БД → API-результат мержим, а не дублируем
+        if parent_item.db_loaded:
+            self.merge_children_from_api(cloud_path, items)
             return
         parent_item.loaded = True
         folders = [it for it in items if it.get("type") == "dir"]
@@ -137,6 +139,44 @@ class FolderTreeModel(QAbstractItemModel):
             child.arrow_known = True
             parent_item.children.append(child)
         self.endInsertRows()
+
+    def merge_children_from_api(self, cloud_path: str, items: list[dict]) -> None:
+        """Досинхронизировать db_loaded-узел списком из API (главный поток).
+
+        Добавляет новые папки, удаляет исчезнувшие, ставит loaded=True.
+        Для узлов без db_loaded — no-op (их обслуживает populate_children).
+        """
+        parent_item = self._find_item(cloud_path)
+        if not parent_item or not parent_item.db_loaded or parent_item.loaded:
+            return
+        folders = [it for it in items if it.get("type") == "dir"]
+        parent_item.loaded = True
+        parent_item._has_children = len(folders) > 0
+        api_by_path = {f["path"]: f for f in folders}
+        # Удаления — с конца, чтобы row-индексы не плыли
+        for row in range(len(parent_item.children) - 1, -1, -1):
+            child = parent_item.children[row]
+            if child.cloud_path not in api_by_path:
+                self.beginRemoveRows(self._index_of(parent_item), row, row)
+                parent_item.children.pop(row)
+                self.endRemoveRows()
+        # Вставки новых
+        existing = {c.cloud_path for c in parent_item.children}
+        new_items = [f for p, f in api_by_path.items() if p not in existing]
+        if new_items:
+            base = len(parent_item.children)
+            self.beginInsertRows(self._index_of(parent_item),
+                                 base, base + len(new_items) - 1)
+            for f in new_items:
+                parent_item.children.append(FolderTreeItem(
+                    name=f["name"], cloud_path=f["path"], parent=parent_item))
+            self.endInsertRows()
+        # Статусы одним batch-запросом
+        if self._db is not None and parent_item.children:
+            paths = [c.cloud_path for c in parent_item.children]
+            batch = self._db.get_folder_batch_aggregate_status(cloud_path, paths)
+            for c in parent_item.children:
+                c.status = batch.get(c.cloud_path, "cloud_only")
 
     def _find_item(self, cloud_path: str) -> FolderTreeItem | None:
         """Поиск узла по cloud_path (рекурсивно)."""
