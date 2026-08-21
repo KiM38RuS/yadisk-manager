@@ -853,6 +853,48 @@ class Database:
             """, (pattern_dir, folder_path, pattern_deep))
         return [dict(r) for r in rows.fetchall()]
 
+    def get_dir_tree_levels(self, parent_path: str) -> tuple[list[dict], set[str]]:
+        """Прямые подпапки parent_path + множество тех, у кого есть свои подпапки.
+
+        Один SQL-запрос достаёт ВСЕ dir-пути под parent_path; группировка по
+        первому сегменту даёт оба уровня сразу (точные стрелки дерева из БД).
+
+        Возвращает (folders, has_subdirs):
+          folders     — [{"path": ..., "name": ...}] прямые подпапки, по алфавиту
+          has_subdirs — cloud_path папок, у которых есть хотя бы одна подпапка
+        """
+        prefix = parent_path.rstrip("/")
+        pattern = (prefix + "/%") if prefix else "/%"
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT cloud_path FROM files "
+                "WHERE type = 'dir' AND cloud_path LIKE ?",
+                (pattern,),
+            ).fetchall()
+        base_len = len(prefix) + 1 if prefix else 1  # срез после "prefix/" или "/"
+        level1: dict[str, dict] = {}
+        has_subdirs: set[str] = set()
+        for (cp,) in rows:
+            rest = cp[base_len:]
+            if "/" in rest:
+                name, _ = rest.split("/", 1)
+                child_path = (prefix + "/" + name) if prefix else "/" + name
+                has_subdirs.add(child_path)
+                level1.setdefault(child_path, {"path": child_path, "name": name})
+            else:
+                level1.setdefault(cp, {"path": cp, "name": rest})
+        folders = sorted(level1.values(), key=lambda d: d["name"].lower())
+        return folders, has_subdirs
+
+    def get_all_dir_paths(self) -> list[str]:
+        """Все облачные пути папок (для автодополнения адресной строки)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT cloud_path FROM files "
+                "WHERE type = 'dir' ORDER BY cloud_path"
+            ).fetchall()
+        return [r["cloud_path"] for r in rows]
+
     # ── Folder status ──────────────────────────────────────
 
     def is_folder_fully_synced(self, folder_path: str) -> bool:
