@@ -3659,7 +3659,7 @@ class MainWindow(QMainWindow):
         """Перейти на уровень вверх."""
         if self._current_path != "/":
             parent = "/".join(self._current_path.rstrip("/").split("/")[:-1]) or "/"
-            self._navigate_to_folder(parent)
+            self._navigate_to_folder(parent, select_after=self._current_path)
 
     # ── Tree sync (дерево следует за навигацией) ────────────
 
@@ -3674,12 +3674,14 @@ class MainWindow(QMainWindow):
             out.append(cur)
         return out
 
-    def _sync_tree_to_path(self, path: str):
+    def _sync_tree_to_path(self, path: str, select_after: str = None):
         """Раскрыть дерево до path и выделить целевую папку.
 
         Недостающих детей берём из БД (DbChildrenThread) — мгновенно;
         API-сверка каждого раскрытого узла запускается в фоне и не
         блокирует ходок.
+        select_after (подъём вверх): в финале ходок подсвечивает папку,
+        из которой вышли, а не пункт назначения.
         """
         # Токен поколения: навигация во время хода инвалидирует колбэки
         # предыдущего хода (иначе поздний ответ выделит устаревшую цель)
@@ -3687,6 +3689,7 @@ class MainWindow(QMainWindow):
         gen = self._tree_sync_gen
         self._tree_sync_queue = self._ancestor_paths(path)
         self._tree_sync_target = path
+        self._tree_sync_select_after = select_after
         self._tree_sync_step(gen)
 
     def _tree_sync_step(self, gen: int):
@@ -3739,8 +3742,18 @@ class MainWindow(QMainWindow):
         self._tree_sync_step(gen)
 
     def _tree_sync_finish(self):
-        """Выделить целевой узел дерева (без очистки таблицы)."""
-        item = self.tree_model._find_item(self._tree_sync_target)
+        """Выделить целевой узел дерева (без очистки таблицы).
+
+        select_after (подъём вверх): подсвечиваем папку, из которой
+        вышли; если её узла нет в дереве — откат на пункт назначения.
+        """
+        target = getattr(self, "_tree_sync_select_after", None) \
+            or self._tree_sync_target
+        item = self.tree_model._find_item(target)
+        if item is None and target != self._tree_sync_target:
+            # Бывшей папки нет в дереве — подсвечиваем назначение
+            target = self._tree_sync_target
+            item = self.tree_model._find_item(target)
         if item is not None:
             idx = self.tree_model._index_of(item)
             sel = self.tree_view.selectionModel()
@@ -3751,11 +3764,13 @@ class MainWindow(QMainWindow):
             self._selection_updating = False
             self.tree_view.scrollTo(idx)
 
-    def _navigate_to_folder(self, path: str):
+    def _navigate_to_folder(self, path: str, select_after: str = None):
         """Мгновенно показать папку из локального кеша, затем в фоне загрузить
         свежие данные из облака и незаметно обновить таблицу.
 
         Сохраняет путь в истории навигации для кнопок Назад/Вперёд.
+        select_after (подъём вверх): после загрузки выделяем папку,
+        из которой вышли (в таблице и в дереве).
         """
         # Не добавляем в историю если это та же папка или подавлено
         if path != self._current_path and not self._nav_history_suppress:
@@ -3776,8 +3791,10 @@ class MainWindow(QMainWindow):
         self._search_history_timer.stop()
         self._search_edit.clear()
         self._update_location_column()
-        # Сохраняем выделение перед навигацией
-        saved_selection = self._get_selected_cloud_paths()
+        # Сохраняем выделение перед навигацией; select_after (подъём вверх)
+        # подменяет его: после загрузки выделяем папку, из которой вышли
+        saved_selection = [select_after] if select_after \
+            else self._get_selected_cloud_paths()
         self._current_path = path
         self._last_requested_path = path
         # Адресная строка следует за навигацией (закрывает открытый редактор)
@@ -3792,7 +3809,7 @@ class MainWindow(QMainWindow):
         self._start_folder_load(path, use_api=True)
 
         # Шаг 3: дерево следует за навигацией (раскрытие + выделение)
-        self._sync_tree_to_path(path)
+        self._sync_tree_to_path(path, select_after=select_after)
 
     def _open_selected_item(self):
         """Открыть выделенный элемент в таблице (аналог двойного клика)."""
@@ -4671,7 +4688,8 @@ class MainWindow(QMainWindow):
                 self._open_file(local_path)
             return
         if item.get("is_parent_nav"):
-            self._navigate_to_folder(item["cloud_path"])
+            self._navigate_to_folder(item["cloud_path"],
+                                     select_after=self._current_path)
             return
         if item["is_dir"]:
             self._navigate_to_folder(item["cloud_path"])
@@ -4704,7 +4722,8 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Backspace:
             if self._current_path != "/":
                 parent = "/".join(self._current_path.rstrip("/").split("/")[:-1]) or "/"
-                self._navigate_to_folder(parent)
+                self._navigate_to_folder(parent,
+                                         select_after=self._current_path)
             return True
 
         # F2 — переименовать выделенный элемент

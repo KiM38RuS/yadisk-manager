@@ -237,3 +237,130 @@ def test_tree_sync_stale_gen_ignored(qapp):
     mw.tree_model.populate_children_from_db.assert_not_called()
     mw._tree_sync_step.assert_not_called()
     mw._tree_sync_finish.assert_not_called()
+
+
+# ── select_after: выделение бывшей папки при подъёме вверх ──────────
+
+def test_navigate_to_folder_select_after_overrides_selection(qapp):
+    """select_after подменяет снимок выделения и уходит в ходок дерева."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._current_path = "/A/B"
+    mw._get_selected_cloud_paths.return_value = ["/A/B/старое.txt"]
+    ui_mod.MainWindow._navigate_to_folder(mw, "/A", select_after="/A/B")
+
+    # Таблица: после загрузки выделяется бывшая папка, а не старый снимок
+    assert mw._pending_selection == ["/A/B"]
+    # Дерево: ходок получил бывшую папку как цель подсветки
+    mw._sync_tree_to_path.assert_called_once_with("/A", select_after="/A/B")
+
+
+def test_navigate_to_folder_without_select_after_keeps_selection(qapp):
+    """Обычная навигация: снимок выделения не подменяется, select_after=None."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._get_selected_cloud_paths.return_value = ["/X/файл.txt"]
+    ui_mod.MainWindow._navigate_to_folder(mw, "/Y")
+
+    assert mw._pending_selection == ["/X/файл.txt"]
+    mw._sync_tree_to_path.assert_called_once_with("/Y", select_after=None)
+
+
+def test_sync_tree_to_path_stores_select_after(qapp):
+    """Ходок запоминает select_after рядом с целью (для финального выделения)."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._tree_sync_gen = 0
+    ui_mod.MainWindow._sync_tree_to_path(mw, "/A", select_after="/A/B")
+
+    assert mw._tree_sync_target == "/A"
+    assert mw._tree_sync_select_after == "/A/B"
+    mw._tree_sync_step.assert_called_once()
+
+
+def test_tree_sync_finish_prefers_select_after(qapp):
+    """Финал ходока: подсвечивается бывшая папка, а не пункт назначения."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._tree_sync_target = "/A"
+    mw._tree_sync_select_after = "/A/B"
+    departed = SimpleNamespace()  # узел бывшей папки найден в дереве
+    mw.tree_model._find_item.side_effect = \
+        lambda p: departed if p == "/A/B" else None
+
+    ui_mod.MainWindow._tree_sync_finish(mw)
+
+    mw.tree_model._index_of.assert_called_once_with(departed)
+    assert mw._selection_updating is False  # защита снята после выделения
+    mw.tree_view.scrollTo.assert_called_once()
+
+
+def test_tree_sync_finish_falls_back_to_target(qapp):
+    """Бывшей папки нет в дереве → откат на подсветку пункта назначения."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._tree_sync_target = "/A"
+    mw._tree_sync_select_after = "/A/Исчезнувшая"
+    dest = SimpleNamespace()
+    mw.tree_model._find_item.side_effect = \
+        lambda p: dest if p == "/A" else None
+
+    ui_mod.MainWindow._tree_sync_finish(mw)
+
+    mw.tree_model._index_of.assert_called_once_with(dest)
+
+
+def test_nav_up_passes_departed_folder(qapp):
+    """Кнопка «Вверх» / Alt+Up: бывшая папка уходит в select_after."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._current_path = "/A/B"
+    ui_mod.MainWindow._nav_up(mw)
+
+    mw._navigate_to_folder.assert_called_once_with("/A", select_after="/A/B")
+
+
+def test_backspace_passes_departed_folder(qapp):
+    """Backspace в таблице: бывшая папка уходит в select_after."""
+    from unittest.mock import MagicMock
+    from PySide6.QtCore import Qt
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._current_path = "/A/B"
+    ev = MagicMock()
+    ev.key.return_value = Qt.Key_Backspace
+
+    handled = ui_mod.MainWindow._handle_table_key(mw, ev)
+
+    assert handled is True
+    mw._navigate_to_folder.assert_called_once_with("/A", select_after="/A/B")
+
+
+def test_parent_nav_row_passes_departed_folder(qapp):
+    """Двойной клик по строке «..»: бывшая папка уходит в select_after."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._search_mode = False
+    mw._current_path = "/A/B"
+    mw._get_item.return_value = {"is_parent_nav": True, "cloud_path": "/A"}
+
+    ui_mod.MainWindow._on_file_double_clicked(mw, MagicMock())
+
+    mw._navigate_to_folder.assert_called_once_with("/A", select_after="/A/B")
