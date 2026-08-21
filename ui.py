@@ -18,7 +18,7 @@ from pathlib import Path
 from queue import Queue, Empty
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, QSize, QEvent, QRect, QPoint, QModelIndex, QByteArray, QItemSelection, QItemSelectionModel, QUrl, QRectF, QMimeData
+from PySide6.QtCore import Qt, QTimer, QSize, QEvent, QRect, QPoint, QModelIndex, QByteArray, QItemSelection, QItemSelectionModel, QUrl, QRectF, QMimeData, QStringListModel
 from PySide6.QtGui import (
     QAction, QIcon, QFont, QColor, QPalette, QBrush,
     QFontDatabase, QShortcut, QKeySequence, QPixmap,
@@ -74,8 +74,10 @@ from ui_threads import (
     DeleteFilesThread as _DeleteFilesThread,
     InternalDropThread as _InternalDropThread,
     PasteFilesThread as _PasteFilesThread,
+    DirPathsThread,
 )
 from ui_search_edit import SearchEdit
+from ui_breadcrumbs import BreadcrumbBar
 
 logger = logging.getLogger(__name__)
 
@@ -432,12 +434,17 @@ class MainWindow(QMainWindow):
             self._hide_left_busy()
             self.statusBar().showMessage(f"❌ {error}")
             self._hide_table_loading()
+            # Крошки не должны показывать несостоявшийся путь
+            self._breadcrumb_bar.set_path(
+                getattr(self, "_last_good_path", "/"))
             return
         # Защита от race: пользователь уже ушёл в другую папку
         if path != self._current_path:
             logger.debug("Ignored stale folder load for %s (current %s)",
                          path, self._current_path)
             return
+        # Папка загружена — запоминаем как последний хороший путь (для отката)
+        self._last_good_path = path
         # Nav-fix: файлы найдены локально → поставить на загрузку и обновить дерево
         for cp in fixed_paths:
             self._pend_upload.add(cp)
@@ -854,6 +861,13 @@ class MainWindow(QMainWindow):
         self._shortcut_search.setShortcut(QKeySequence("Ctrl+F"))
         self._shortcut_search.triggered.connect(self._focus_search)
         self.addAction(self._shortcut_search)
+
+        # Ctrl+L / Alt+D — фокус в адресную строку (как в Проводнике)
+        for _seq in ("Ctrl+L", "Alt+D"):
+            _act_addr = QAction("Адресная строка", self)
+            _act_addr.setShortcut(QKeySequence(_seq))
+            _act_addr.triggered.connect(self._focus_address_bar)
+            self.addAction(_act_addr)
 
     # ── Theme ─────────────────────────────────────────────
 
@@ -1484,6 +1498,16 @@ class MainWindow(QMainWindow):
         right_margin = QWidget()
         right_margin.setFixedWidth(6)
         tb.addWidget(right_margin)
+
+        # Адресная строка (breadcrumbs) — отдельная полоса под основным тулбаром
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        addr_tb = QToolBar("Адрес", self)
+        addr_tb.setMovable(False)
+        self._breadcrumb_bar = BreadcrumbBar()
+        addr_tb.addWidget(self._breadcrumb_bar)
+        self.addToolBar(addr_tb)
+        self._breadcrumb_bar.navigate.connect(self._on_breadcrumb_navigate)
+        self._breadcrumb_bar.editor_shown.connect(self._refresh_path_completer)
 
         # Начальное состояние кнопок
         self._update_toolbar_buttons()
@@ -3662,6 +3686,8 @@ class MainWindow(QMainWindow):
         saved_selection = self._get_selected_cloud_paths()
         self._current_path = path
         self._last_requested_path = path
+        # Адресная строка следует за навигацией (закрывает открытый редактор)
+        self._breadcrumb_bar.set_path(path)
 
         # Шаг 1: из БД (без спиннера; SQLite в фоновом потоке)
         self._pending_selection = saved_selection
@@ -4790,6 +4816,40 @@ class MainWindow(QMainWindow):
         """Перевести фокус в строку поиска (Ctrl+F)."""
         self._search_edit.setFocus()
         self._search_edit.selectAll()
+
+    # ── Адресная строка (breadcrumbs) ─────────────────────
+
+    def _focus_address_bar(self):
+        """Ctrl+L / Alt+D: войти в режим ввода пути."""
+        self._breadcrumb_bar.show_editor()
+
+    def _on_breadcrumb_navigate(self, path: str):
+        """Переход из адресной строки с мгновенной проверкой существования.
+
+        Ограничение: папки, созданные в облаке в обход Менеджера и ещё не
+        попавшие в локальную БД, потребуют обычной навигации (дерево/поиск) —
+        они отклоняются здесь как «не найденные» до ближайшей синхронизации.
+        """
+        if path != "/" and not self._db.get_file(path):
+            self.statusBar().showMessage(f"Папка не найдена: {path}", 5000)
+            self._breadcrumb_bar.show_editor_with(path)
+            return
+        self._navigate_to_folder(path)
+
+    def _refresh_path_completer(self):
+        """Перечитать список папок из БД для автодополнения адресной строки."""
+        t = DirPathsThread(self._db, self)
+
+        def _done(paths, err):
+            if err:
+                logger.warning("Path completer refresh failed: %s", err)
+                return
+            self._breadcrumb_bar.set_completer_model(
+                QStringListModel(paths, self))
+
+        t.finished.connect(_done)
+        t.finished.connect(t.deleteLater)
+        t.start()
 
     def _do_search(self):
         """Запустить фоновый поток поиска (после debounce)."""

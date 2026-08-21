@@ -94,3 +94,42 @@ def test_editor_roundtrip(qapp):
     assert got == ["/B"]                     # нормализовано: хвостовой слэш снят
     assert bar._editor.isHidden() is True    # вернулись к крошкам
     assert bar._crumbs.isHidden() is False
+
+
+# ── Интеграция с MainWindow (без инстанцирования: unbound-вызов + моки) ──
+
+def _fake_mainwindow(db_get_file):
+    """Заглушка MainWindow: только то, что трогает _on_breadcrumb_navigate."""
+    from unittest.mock import MagicMock
+    mw = MagicMock()
+    mw._db.get_file.side_effect = db_get_file
+    return mw
+
+
+def test_breadcrumb_navigate_rejects_unknown_path(qapp):
+    """Несуществующий в БД путь: навигация не запускается, редактор возвращается."""
+    import ui as ui_mod
+    mw = _fake_mainwindow(lambda p: None)
+    ui_mod.MainWindow._on_breadcrumb_navigate(mw, "/Нет такой")
+    mw._navigate_to_folder.assert_not_called()
+    mw._breadcrumb_bar.show_editor_with.assert_called_once_with("/Нет такой")
+
+
+def test_breadcrumb_navigate_known_path_delegates(qapp):
+    """Существующий путь (и корень) → обычная навигация."""
+    import ui as ui_mod
+    mw = _fake_mainwindow(lambda p: {"cloud_path": p} if p == "/Есть" else None)
+    ui_mod.MainWindow._on_breadcrumb_navigate(mw, "/Есть")
+    ui_mod.MainWindow._on_breadcrumb_navigate(mw, "/")  # корень всегда разрешён
+    assert mw._navigate_to_folder.call_args_list[0][0][0] == "/Есть"
+    assert mw._navigate_to_folder.call_args_list[1][0][0] == "/"
+    mw._breadcrumb_bar.show_editor_with.assert_not_called()
+
+
+def test_focus_address_bar_shows_editor(qapp):
+    """Ctrl+L / Alt+D → show_editor()."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+    mw = MagicMock()
+    ui_mod.MainWindow._focus_address_bar(mw)
+    mw._breadcrumb_bar.show_editor.assert_called_once()
