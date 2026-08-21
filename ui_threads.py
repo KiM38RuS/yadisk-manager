@@ -93,6 +93,45 @@ class ApiListThread(QThread):
             self.finished.emit([], str(e))
 
 
+class DbChildrenThread(QThread):
+    """Фоновое чтение подпапок из БД: уровень 1 + наличие подпапок (стрелки).
+
+    Мгновенная альтернатива ApiListThread для раскрытия дерева: локальный
+    SQLite-запрос вместо сетевого. Объекты возвращаются как есть:
+    finished(list[dict], set[str], str)
+    """
+    finished = Signal(list, object, str)  # folders, has_subdirs, error_msg
+
+    def __init__(self, database, parent_path: str, parent=None):
+        super().__init__(parent)
+        self._database = database
+        self._parent_path = parent_path
+
+    def run(self):
+        try:
+            folders, has_subdirs = self._database.get_dir_tree_levels(self._parent_path)
+            self.finished.emit(folders, has_subdirs, "")
+        except Exception as e:
+            logger.error("DbChildrenThread: %s FAILED: %s", self._parent_path, e)
+            self.finished.emit([], set(), str(e))
+
+
+class DirPathsThread(QThread):
+    """Фоновое чтение всех облачных путей папок (автодополнение адресной строки)."""
+    finished = Signal(list, str)  # paths, error_msg
+
+    def __init__(self, database, parent=None):
+        super().__init__(parent)
+        self._database = database
+
+    def run(self):
+        try:
+            self.finished.emit(self._database.get_all_dir_paths(), "")
+        except Exception as e:
+            logger.error("DirPathsThread FAILED: %s", e)
+            self.finished.emit([], str(e))
+
+
 class FolderLoadThread(QThread):
     """Фоновый поток: список папки (API) + синхронизация БД + сбор данных таблицы.
 
