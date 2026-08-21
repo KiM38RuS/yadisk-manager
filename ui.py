@@ -107,6 +107,8 @@ class MainWindow(QMainWindow):
         self._current_path = "/"
         # После загрузки всех файлов переключаемся на навигацию через API
         self._last_requested_path = "/"
+        # Последний успешно загруженный путь (откат крошек при ошибке)
+        self._last_good_path = "/"
         self._syncing: set[str] = set()
         self._recently_downloaded: set[str] = set()
         self._pend_upload: set[str] = set()
@@ -434,9 +436,10 @@ class MainWindow(QMainWindow):
             self._hide_left_busy()
             self.statusBar().showMessage(f"❌ {error}")
             self._hide_table_loading()
-            # Крошки не должны показывать несостоявшийся путь
-            self._breadcrumb_bar.set_path(
-                getattr(self, "_last_good_path", "/"))
+            # Крошки не должны показывать несостоявшийся путь; откат только
+            # если пользователь всё ещё ждёт именно эту папку (не ушёл дальше)
+            if path == self._current_path:
+                self._breadcrumb_bar.set_path(self._last_good_path)
             return
         # Защита от race: пользователь уже ушёл в другую папку
         if path != self._current_path:
@@ -4830,7 +4833,10 @@ class MainWindow(QMainWindow):
         попавшие в локальную БД, потребуют обычной навигации (дерево/поиск) —
         они отклоняются здесь как «не найденные» до ближайшей синхронизации.
         """
-        if path != "/" and not self._db.get_file(path):
+        row = self._db.get_file(path)
+        # Только папки: путь до файла прошёл бы проверку, но навигация в него
+        # гарантированно дала бы 404 от API
+        if path != "/" and (not row or row.get("type") != "dir"):
             self.statusBar().showMessage(f"Папка не найдена: {path}", 5000)
             self._breadcrumb_bar.show_editor_with(path)
             return

@@ -116,14 +116,25 @@ def test_breadcrumb_navigate_rejects_unknown_path(qapp):
 
 
 def test_breadcrumb_navigate_known_path_delegates(qapp):
-    """Существующий путь (и корень) → обычная навигация."""
+    """Существующая ПАПКА (и корень) → обычная навигация."""
     import ui as ui_mod
-    mw = _fake_mainwindow(lambda p: {"cloud_path": p} if p == "/Есть" else None)
+    mw = _fake_mainwindow(
+        lambda p: {"cloud_path": p, "type": "dir"} if p == "/Есть" else None)
     ui_mod.MainWindow._on_breadcrumb_navigate(mw, "/Есть")
     ui_mod.MainWindow._on_breadcrumb_navigate(mw, "/")  # корень всегда разрешён
     assert mw._navigate_to_folder.call_args_list[0][0][0] == "/Есть"
     assert mw._navigate_to_folder.call_args_list[1][0][0] == "/"
     mw._breadcrumb_bar.show_editor_with.assert_not_called()
+
+
+def test_breadcrumb_navigate_rejects_file_path(qapp):
+    """Путь до ФАЙЛА проходит проверку существования, но не папка — отклоняем."""
+    import ui as ui_mod
+    mw = _fake_mainwindow(
+        lambda p: {"cloud_path": p, "type": "file"} if p == "/файл.txt" else None)
+    ui_mod.MainWindow._on_breadcrumb_navigate(mw, "/файл.txt")
+    mw._navigate_to_folder.assert_not_called()
+    mw._breadcrumb_bar.show_editor_with.assert_called_once_with("/файл.txt")
 
 
 def test_focus_address_bar_shows_editor(qapp):
