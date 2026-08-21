@@ -920,9 +920,10 @@ class Database:
               AND type = 'file'
         """, (pattern, folder_path)).fetchone()
         if not row or row["total"] == 0:
-            # Пустая папка — проверяем её собственный статус
-            with self._lock:
-                folder = self.get_file(folder_path)
+            # Пустая папка — проверяем её собственный статус.
+            # ВАЖНО: без внешнего with self._lock — get_file() берёт лок сам,
+            # а threading.Lock нереентерабелен (иначе дедлок).
+            folder = self.get_file(folder_path)
             return folder is not None and folder["status"] == "downloaded"
         return row["total"] == row["synced"]
 
