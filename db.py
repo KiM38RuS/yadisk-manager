@@ -864,11 +864,14 @@ class Database:
           has_subdirs — cloud_path папок, у которых есть хотя бы одна подпапка
         """
         prefix = parent_path.rstrip("/")
-        pattern = (prefix + "/%") if prefix else "/%"
+        # Экранируем спецсимволы LIKE в имени папки (% _ \),
+        # иначе "my_folder" совпадёт с "myXfolder"
+        safe_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = (safe_prefix + "/%") if prefix else "/%"
         with self._lock:
             rows = self._conn.execute(
                 "SELECT cloud_path FROM files "
-                "WHERE type = 'dir' AND cloud_path LIKE ?",
+                "WHERE type = 'dir' AND cloud_path LIKE ? ESCAPE '\\'",
                 (pattern,),
             ).fetchall()
         base_len = len(prefix) + 1 if prefix else 1  # срез после "prefix/" или "/"
@@ -883,7 +886,8 @@ class Database:
                 level1.setdefault(child_path, {"path": child_path, "name": name})
             else:
                 level1.setdefault(cp, {"path": cp, "name": rest})
-        folders = sorted(level1.values(), key=lambda d: d["name"].lower())
+        folders = sorted(level1.values(),
+                         key=lambda d: (d["name"].lower(), d["path"]))
         return folders, has_subdirs
 
     def get_all_dir_paths(self) -> list[str]:

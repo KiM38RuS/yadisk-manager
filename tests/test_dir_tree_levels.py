@@ -26,3 +26,34 @@ def test_all_dir_paths(populated_db):
     assert "/Документы" in paths
     assert "/Фото/2024" in paths
     assert paths == sorted(paths)
+
+
+def test_levels_underscore_name_not_wildcard(populated_db):
+    """Имя с '_' не трактуется как LIKE-шаблон: чужие папки не подтягиваются."""
+    populated_db.upsert_files_batch([
+        {"path": "/my_folder", "name": "my_folder", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+        {"path": "/my_folder/sub", "name": "sub", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+        {"path": "/myXfolder", "name": "myXfolder", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+        {"path": "/myXfolder/trap", "name": "trap", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+    ])
+    folders, subs = populated_db.get_dir_tree_levels("/my_folder")
+    # Легитимный ребёнок на месте, чужой /myXfolder/trap не подтянулся
+    assert [f["path"] for f in folders] == ["/my_folder/sub"]
+    assert subs == set()
+
+
+def test_levels_percent_name_not_wildcard(populated_db):
+    """Имя с '%' не трактуется как LIKE-шаблон."""
+    populated_db.upsert_files_batch([
+        {"path": "/100%", "name": "100%", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+        {"path": "/100%/подпапка", "name": "подпапка", "type": "dir",
+         "size": 0, "modified": "2025-01-01T00:00:00Z", "md5": ""},
+    ])
+    folders, subs = populated_db.get_dir_tree_levels("/100%")
+    assert [f["path"] for f in folders] == ["/100%/подпапка"]
+    assert subs == set()
