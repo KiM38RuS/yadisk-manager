@@ -213,18 +213,19 @@ class DoHResolver:
                     headers={"accept": "application/dns-json"})
                 resp.raise_for_status()
                 data = resp.json()
-            except (requests.RequestException, ValueError) as e:
+                answers = [a for a in data.get("Answer", [])
+                           if a.get("type") == 1
+                           and _is_ipv4(str(a.get("data", "")))]
+                if not answers:
+                    # NXDOMAIN / нет A-записей — валидный пустой ответ
+                    return [], TTL_MIN_S
+                raw_ttl = min(int(a.get("TTL", TTL_MAX_S)) for a in answers)
+                ttl = max(TTL_MIN_S, min(raw_ttl, TTL_MAX_S))
+            except (requests.RequestException, ValueError,
+                    AttributeError, TypeError) as e:
                 logger.warning("DoH %s failed: %s", base, e)
                 last_exc = e
                 continue
-            answers = [a for a in data.get("Answer", [])
-                       if a.get("type") == 1
-                       and _is_ipv4(str(a.get("data", "")))]
-            if not answers:
-                # NXDOMAIN / нет A-записей — валидный пустой ответ
-                return [], TTL_MIN_S
-            raw_ttl = min(int(a.get("TTL", TTL_MAX_S)) for a in answers)
-            ttl = max(TTL_MIN_S, min(raw_ttl, TTL_MAX_S))
             ips = [str(a["data"]) for a in answers]
             logger.info("DoH %s: %s -> %s (ttl=%ss)", base, host, ips, ttl)
             return ips, ttl

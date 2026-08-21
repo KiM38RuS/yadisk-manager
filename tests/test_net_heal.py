@@ -277,3 +277,23 @@ class TestDoHResolver:
         ips, _ = resolver.resolve("h.test")
         assert ips == ["1.1.1.1"]
         assert len(session.calls) == 2
+
+    def test_non_dict_json_treated_as_failure(self):
+        resolver, session = self._make([
+            FakeResp([1, 2]),                               # мусор вместо JSON-объекта
+            FakeResp(_doh_answer((1, 60, "1.1.1.1"))),
+        ])
+        ips, _ = resolver.resolve("h.test")
+        assert ips == ["1.1.1.1"]
+        assert len(session.calls) == 2
+
+    def test_bad_ttl_value_treated_as_failure(self):
+        resolver, session = self._make([
+            FakeResp({"Status": 0, "Answer": [
+                {"name": "h.test.", "type": 1, "TTL": "abc",
+                 "data": "1.1.1.1"}]}),
+            FakeResp(_doh_answer((1, 60, "1.1.1.1"))),
+        ])
+        ips, _ = resolver.resolve("h.test")
+        assert ips == ["1.1.1.1"]
+        assert len(session.calls) == 2
