@@ -169,3 +169,111 @@ class TestIpCache:
         for t in threads:
             t.join()
         assert errors == []
+
+
+class FakeResp:
+    def __init__(self, payload=None, exc=None):
+        self._payload = payload
+        self._exc = exc
+
+    def raise_for_status(self):
+        if self._exc:
+            raise self._exc
+
+    def json(self):
+        if isinstance(self._payload, ValueError):
+            raise self._payload
+        return self._payload
+
+
+class FakeSession:
+    """Подменяет requests.Session: очередь ответов по порядку вызовов."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls: list[str] = []
+
+    def get(self, url, timeout=None, headers=None):
+        self.calls.append(url)
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _doh_answer(*answers, status=0):
+    return {"Status": status, "Answer": [
+        {"name": "s41nrg.storage.yandex.net.", "type": t, "TTL": ttl,
+         "data": data} for (t, ttl, data) in answers]}
+
+
+class TestDoHResolver:
+    def _make(self, responses):
+        from net_heal import DoHResolver
+        session = FakeSession(responses)
+        return DoHResolver(session=session), session
+
+    def test_primary_endpoint_answer(self):
+        resolver, session = self._make([
+            FakeResp(_doh_answer((1, 300, "37.140.178.41"))),
+        ])
+        ips, ttl = resolver.resolve("s41nrg.storage.yandex.net")
+        assert ips == ["37.140.178.41"]
+        assert ttl == 300
+        assert len(session.calls) == 1
+        assert "name=s41nrg.storage.yandex.net" in session.calls[0]
+
+    def test_fallback_to_second_endpoint(self):
+        resolver, session = self._make([
+            requests.Timeout("primary dead"),               # 1.1.1.1 упал
+            FakeResp(_doh_answer((1, 120, "77.88.8.8"))),   # 8.8.8.8 ответил
+        ])
+        ips, ttl = resolver.resolve("h.test")
+        assert ips == ["77.88.8.8"]
+        assert ttl == 120
+        assert len(session.calls) == 2
+
+    def test_all_endpoints_failed_raises_net_block_error(self):
+        resolver, session = self._make([
+            requests.ConnectTimeout("t"), requests.ConnectionError("c"),
+        ])
+        with pytest.raises(NetBlockError) as ei:
+            resolver.resolve("h.test")
+        assert ei.value.kind == NetIssue.DnsBlocked
+        assert len(session.calls) == 2
+
+    def test_filters_non_a_records_and_bad_data(self):
+        resolver, _ = self._make([
+            FakeResp(_doh_answer(
+                (5, 60, "cname.yandex.net."),        # CNAME — мимо
+                (28, 60, "2a02:6b8::1"),             # AAAA — мимо (вне объёма)
+                (1, 90, "37.140.178.41"),            # A — берём
+                (1, 90, "not-an-ip"),                # мусор — мимо
+            )),
+        ])
+        ips, ttl = resolver.resolve("h.test")
+        assert ips == ["37.140.178.41"]
+        assert ttl == 90
+
+    def test_empty_answer_returns_empty_list(self):
+        resolver, _ = self._make([FakeResp({"Status": 3})])  # NXDOMAIN
+        ips, ttl = resolver.resolve("ghost.test")
+        assert ips == []
+        assert ttl == 60
+
+    def test_ttl_clamped(self):
+        resolver, _ = self._make([FakeResp(_doh_answer((1, 10, "1.1.1.1")))])
+        _, ttl = resolver.resolve("h.test")
+        assert ttl == 60
+        resolver2, _ = self._make([FakeResp(_doh_answer((1, 99999, "1.1.1.1")))])
+        _, ttl2 = resolver2.resolve("h.test")
+        assert ttl2 == 3600
+
+    def test_broken_json_treated_as_failure(self):
+        resolver, session = self._make([
+            FakeResp(ValueError("bad json")),
+            FakeResp(_doh_answer((1, 60, "1.1.1.1"))),
+        ])
+        ips, _ = resolver.resolve("h.test")
+        assert ips == ["1.1.1.1"]
+        assert len(session.calls) == 2

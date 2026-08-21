@@ -16,6 +16,7 @@ disk_api.YaDiskAPI и вызывается из воркер-потоков.
 
 import collections
 import enum
+import ipaddress
 import logging
 import socket
 import threading
@@ -174,3 +175,57 @@ class IpCache:
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+
+
+# ── DNS-over-HTTPS ───────────────────────────────────────
+
+
+def _is_ipv4(value: str) -> bool:
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except ValueError:
+        return False
+
+
+class DoHResolver:
+    """DNS-over-HTTPS JSON (диалект Cloudflare/Google, RFC 8484-совместимый).
+
+    Эндпоинты заданы голыми IP — их сертификаты валидны без DNS.
+    Собственная чистая сессия requests БЕЗ HealedAdapter (иначе рекурсия).
+    """
+
+    def __init__(self, timeout_s: float = DOH_TIMEOUT_S, session=None):
+        self._timeout_s = timeout_s
+        self._session = session if session is not None else requests.Session()
+
+    def resolve(self, host: str) -> tuple[list[str], int]:
+        """A-записи хоста и TTL (зажатый в [TTL_MIN_S..TTL_MAX_S]).
+
+        Raises NetBlockError, если ни один эндпоинт не ответил.
+        """
+        last_exc: Optional[Exception] = None
+        for base in DOH_ENDPOINTS:
+            url = f"{base}?name={quote(host, safe='')}&type=A"
+            try:
+                resp = self._session.get(
+                    url, timeout=self._timeout_s,
+                    headers={"accept": "application/dns-json"})
+                resp.raise_for_status()
+                data = resp.json()
+            except (requests.RequestException, ValueError) as e:
+                logger.warning("DoH %s failed: %s", base, e)
+                last_exc = e
+                continue
+            answers = [a for a in data.get("Answer", [])
+                       if a.get("type") == 1
+                       and _is_ipv4(str(a.get("data", "")))]
+            if not answers:
+                # NXDOMAIN / нет A-записей — валидный пустой ответ
+                return [], TTL_MIN_S
+            raw_ttl = min(int(a.get("TTL", TTL_MAX_S)) for a in answers)
+            ttl = max(TTL_MIN_S, min(raw_ttl, TTL_MAX_S))
+            ips = [str(a["data"]) for a in answers]
+            logger.info("DoH %s: %s -> %s (ttl=%ss)", base, host, ips, ttl)
+            return ips, ttl
+        raise NetBlockError(NetIssue.DnsBlocked, host) from last_exc
