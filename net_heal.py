@@ -123,3 +123,54 @@ def drain_block_events() -> list[tuple[float, NetIssue, str]]:
         out = list(_events)
         _events.clear()
     return out
+
+
+# ── кэш IP ───────────────────────────────────────────────
+
+
+class IpCache:
+    """Потокобезопасный кэш «хост → список рабочих IP» с TTL.
+
+    Отрицательное кэширование: IP, на котором соединение упало, удаляется
+    до конца TTL (mark_bad) — следующий запрос возьмёт другой IP или
+    перерезолвит через DoH (ротация CDN-адресов Яндекса).
+    """
+
+    def __init__(self, time_fn: Callable[[], float] = time.monotonic):
+        self._time_fn = time_fn
+        self._lock = threading.Lock()
+        self._data: dict[str, tuple[list[str], float]] = {}
+
+    def get(self, host: str) -> list[str]:
+        """Свежие IP хоста (копия списка) или []."""
+        with self._lock:
+            entry = self._data.get(host)
+            if entry is None:
+                return []
+            ips, expires_at = entry
+            if self._time_fn() >= expires_at:
+                del self._data[host]
+                return []
+            return list(ips)
+
+    def put(self, host: str, ips: list[str], ttl_s: int) -> None:
+        ttl = max(TTL_MIN_S, min(int(ttl_s), TTL_MAX_S))
+        with self._lock:
+            self._data[host] = (list(ips), self._time_fn() + ttl)
+
+    def mark_bad(self, host: str, ip: str) -> None:
+        """Пометить IP нерабочим до конца TTL."""
+        with self._lock:
+            entry = self._data.get(host)
+            if entry is None:
+                return
+            ips, expires_at = entry
+            remaining = [x for x in ips if x != ip]
+            if remaining:
+                self._data[host] = (remaining, expires_at)
+            else:
+                del self._data[host]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()

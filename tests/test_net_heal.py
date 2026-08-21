@@ -94,3 +94,78 @@ class TestBlockEvents:
         assert err.kind == NetIssue.DnsBlocked
         assert err.host == "x.test"
         assert not isinstance(err, requests.RequestException)
+
+
+class FakeClock:
+    def __init__(self, now=100.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class TestIpCache:
+    def _make(self):
+        from net_heal import IpCache
+        self.clock = FakeClock()
+        return IpCache(time_fn=self.clock)
+
+    def test_put_get_roundtrip(self):
+        cache = self._make()
+        cache.put("h.test", ["1.1.1.1", "2.2.2.2"], ttl_s=300)
+        assert cache.get("h.test") == ["1.1.1.1", "2.2.2.2"]
+
+    def test_ttl_expiry(self):
+        cache = self._make()
+        cache.put("h.test", ["1.1.1.1"], ttl_s=300)
+        self.clock.now += 301
+        assert cache.get("h.test") == []
+
+    def test_ttl_clamped_to_bounds(self):
+        cache = self._make()
+        cache.put("low.test", ["1.1.1.1"], ttl_s=5)      # → минимум 60с
+        self.clock.now += 61
+        assert cache.get("low.test") == []
+        cache.put("high.test", ["1.1.1.1"], ttl_s=99999)  # → максимум 3600с
+        self.clock.now += 3601
+        assert cache.get("high.test") == []
+
+    def test_mark_bad_removes_ip_until_expiry(self):
+        cache = self._make()
+        cache.put("h.test", ["1.1.1.1", "2.2.2.2"], ttl_s=300)
+        cache.mark_bad("h.test", "1.1.1.1")
+        assert cache.get("h.test") == ["2.2.2.2"]
+        cache.mark_bad("h.test", "2.2.2.2")
+        assert cache.get("h.test") == []          # список пуст → перерезолв
+        # после истечения TTL запись исчезла полностью
+        cache.put("h.test", ["3.3.3.3"], ttl_s=300)
+        self.clock.now += 301
+        cache.mark_bad("h.test", "3.3.3.3")
+        assert cache.get("h.test") == []
+
+    def test_unknown_host_and_ip_are_noop(self):
+        cache = self._make()
+        cache.mark_bad("ghost.test", "1.1.1.1")
+        assert cache.get("ghost.test") == []
+
+    def test_thread_safety_smoke(self):
+        import threading
+        cache = self._make()
+        errors: list[Exception] = []
+
+        def worker(n):
+            try:
+                for i in range(200):
+                    host = f"h{n}.test"
+                    cache.put(host, [f"10.0.{n}.{i % 250}"], ttl_s=300)
+                    cache.get(host)
+                    cache.mark_bad(host, f"10.0.{n}.{i % 250}")
+            except Exception as e:  # pragma: no cover
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
