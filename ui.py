@@ -74,6 +74,7 @@ from ui_threads import (
     DeleteFilesThread as _DeleteFilesThread,
     InternalDropThread as _InternalDropThread,
     PasteFilesThread as _PasteFilesThread,
+    DbChildrenThread,
     DirPathsThread,
 )
 from ui_search_edit import SearchEdit
@@ -3660,6 +3661,83 @@ class MainWindow(QMainWindow):
             parent = "/".join(self._current_path.rstrip("/").split("/")[:-1]) or "/"
             self._navigate_to_folder(parent)
 
+    # ── Tree sync (дерево следует за навигацией) ────────────
+
+    @staticmethod
+    def _ancestor_paths(path: str) -> list[str]:
+        """['/A/B/C'] → ['/', '/A', '/A/B', '/A/B/C']"""
+        parts = [p for p in path.split("/") if p]
+        out = ["/"]
+        cur = ""
+        for p in parts:
+            cur += "/" + p
+            out.append(cur)
+        return out
+
+    def _sync_tree_to_path(self, path: str):
+        """Раскрыть дерево до path и выделить целевую папку.
+
+        Недостающих детей берём из БД (DbChildrenThread) — мгновенно;
+        API-сверка каждого раскрытого узла запускается в фоне и не
+        блокирует ходок.
+        """
+        self._tree_sync_queue = self._ancestor_paths(path)
+        self._tree_sync_target = path
+        self._tree_sync_step()
+
+    def _tree_sync_step(self):
+        while self._tree_sync_queue:
+            p = self._tree_sync_queue.pop(0)
+            item = self.tree_model._find_item(p)
+            if item is None:
+                # Узла нет — нужны дети родителя из БД
+                parent_p = ("/".join(p.rstrip("/").split("/")[:-1])) or "/"
+                parent_item = self.tree_model._find_item(parent_p)
+                if parent_item is None or parent_item.db_loaded or parent_item.loaded:
+                    logger.debug("Tree sync: %s unavailable, stopping", p)
+                    break
+                t = DbChildrenThread(self._db, parent_p, self)
+                t.finished.connect(
+                    lambda folders, subs, err, pp=parent_p:
+                        self._on_db_children_for_sync(pp, folders, subs, err))
+                t.finished.connect(t.deleteLater)
+                self._active_threads.append(t)
+                t.finished.connect(lambda: self._cleanup_thread(t))
+                t.start()
+                return  # продолжение в колбэке
+            idx = self.tree_model._index_of(item)
+            self.tree_view.expand(idx)
+            if not item.loaded:
+                # Фоновая API-сверка: результат придёт в merge (не ждём)
+                self._fetch_folder_list(
+                    p, lambda items, err, cp=p:
+                        self._on_tree_children_loaded(items, err, cp))
+        self._tree_sync_finish()
+
+    def _on_db_children_for_sync(self, parent_path, folders, has_subdirs, error):
+        """Дети из БД получены — вставить и продолжить ходок."""
+        if error:
+            logger.warning("Tree sync DB fetch failed for %s: %s",
+                           parent_path, error)
+            self._tree_sync_finish()
+            return
+        self.tree_model.populate_children_from_db(
+            parent_path, folders, has_subdirs)
+        self._tree_sync_step()
+
+    def _tree_sync_finish(self):
+        """Выделить целевой узел дерева (без очистки таблицы)."""
+        item = self.tree_model._find_item(self._tree_sync_target)
+        if item is not None:
+            idx = self.tree_model._index_of(item)
+            sel = self.tree_view.selectionModel()
+            # _selection_updating: не давать tree-selection обнулить таблицу
+            self._selection_updating = True
+            sel.setCurrentIndex(
+                idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+            self._selection_updating = False
+            self.tree_view.scrollTo(idx)
+
     def _navigate_to_folder(self, path: str):
         """Мгновенно показать папку из локального кеша, затем в фоне загрузить
         свежие данные из облака и незаметно обновить таблицу.
@@ -3699,6 +3777,9 @@ class MainWindow(QMainWindow):
         # Шаг 2: в фоне — API (обновление БД; перерисовка только если
         # набор путей изменился — см. _on_folder_loaded)
         self._start_folder_load(path, use_api=True)
+
+        # Шаг 3: дерево следует за навигацией (раскрытие + выделение)
+        self._sync_tree_to_path(path)
 
     def _open_selected_item(self):
         """Открыть выделенный элемент в таблице (аналог двойного клика)."""
@@ -4577,7 +4658,6 @@ class MainWindow(QMainWindow):
                 self._open_file(local_path)
             return
         if item.get("is_parent_nav"):
-            self.tree_view.clearSelection()
             self._navigate_to_folder(item["cloud_path"])
             return
         if item["is_dir"]:
@@ -4611,7 +4691,6 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Backspace:
             if self._current_path != "/":
                 parent = "/".join(self._current_path.rstrip("/").split("/")[:-1]) or "/"
-                self.tree_view.clearSelection()
                 self._navigate_to_folder(parent)
             return True
 

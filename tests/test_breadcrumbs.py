@@ -144,3 +144,83 @@ def test_focus_address_bar_shows_editor(qapp):
     mw = MagicMock()
     ui_mod.MainWindow._focus_address_bar(mw)
     mw._breadcrumb_bar.show_editor.assert_called_once()
+
+
+# ── Синк-ходок дерева (_sync_tree_to_path): чистая логика шагов ──
+
+def test_ancestor_paths(qapp):
+    """Путь → цепочка предков от корня (включая сам путь)."""
+    import ui as ui_mod
+    assert ui_mod.MainWindow._ancestor_paths("/A/B/C") == \
+        ["/", "/A", "/A/B", "/A/B/C"]
+    assert ui_mod.MainWindow._ancestor_paths("/") == ["/"]
+
+
+def test_tree_sync_step_expands_existing(qapp):
+    """Все узлы пути есть в дереве и загружены → раскрыть без БД/API-ожидания."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._tree_sync_queue = ["/", "/A", "/A/B"]
+    mw._tree_sync_target = "/A/B"
+    mw.tree_model._find_item.side_effect = lambda p: SimpleNamespace(loaded=True)
+
+    ui_mod.MainWindow._tree_sync_step(mw)
+
+    assert mw._tree_sync_queue == []            # очередь исчерпана
+    assert mw.tree_view.expand.call_count == 3  # каждый узел раскрыт
+    mw._fetch_folder_list.assert_not_called()   # узлы уже loaded — API не нужен
+    mw._tree_sync_finish.assert_called_once()
+
+
+def test_tree_sync_step_fetches_db_children(qapp, monkeypatch):
+    """Узла нет в дереве → ходок запрашивает детей родителя из БД и ждёт колбэк."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    created = []
+
+    class FakeThread:
+        def __init__(self, db, parent_path, parent=None):
+            created.append(parent_path)
+            self.finished = MagicMock()
+            self.deleteLater = lambda: None
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(ui_mod, "DbChildrenThread", FakeThread)
+
+    mw = MagicMock()
+    mw._tree_sync_queue = ["/", "/A", "/A/B"]
+    mw._tree_sync_target = "/A/B"
+    # Корень есть, но ещё не загружен (loaded/db_loaded = False); /A отсутствует
+    from types import SimpleNamespace
+    mw.tree_model._find_item.side_effect = \
+        lambda p: SimpleNamespace(loaded=False, db_loaded=False) if p == "/" else None
+
+    ui_mod.MainWindow._tree_sync_step(mw)
+
+    assert created == ["/"]                # дети корня запрошены из БД
+    assert mw._tree_sync_queue == ["/A/B"]  # очередь заморожена до колбэка
+    mw._tree_sync_finish.assert_not_called()  # ходок ждёт колбэк
+
+
+def test_tree_sync_db_children_callback(qapp):
+    """Колбэк БД: успех → вставить детей и продолжить; ошибка → завершить."""
+    from unittest.mock import MagicMock
+    import ui as ui_mod
+
+    # Успех: populate + продолжение ходока
+    mw = MagicMock()
+    ui_mod.MainWindow._on_db_children_for_sync(mw, "/", [], set(), "")
+    mw.tree_model.populate_children_from_db.assert_called_once_with("/", [], set())
+    mw._tree_sync_step.assert_called_once()
+
+    # Ошибка: без вставки, ходок завершается
+    mw2 = MagicMock()
+    ui_mod.MainWindow._on_db_children_for_sync(mw2, "/", [], set(), "db error")
+    mw2.tree_model.populate_children_from_db.assert_not_called()
+    mw2._tree_sync_finish.assert_called_once()
