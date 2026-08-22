@@ -8,8 +8,12 @@ Focuses on:
   4. get_children() correctness
 """
 
+import json
 import os
+
 import pytest
+
+import db
 
 
 class TestDatabaseBasics:
@@ -364,3 +368,26 @@ class TestConfigLock:
         assert db_mod.get_theme() == "light"
         db_mod.set_theme("system")
         assert db_mod.get_theme() == "system"
+
+
+class TestNetHealFlag:
+    """Tri-state флаг net_heal_enabled: True/False — выбор сделан,
+    None — пользователя ещё не спрашивали."""
+
+    def test_default_is_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db, "CONFIG_PATH", str(tmp_path / "config.json"))
+        assert db.get_net_heal_enabled() is None
+
+    def test_set_true_false_roundtrip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db, "CONFIG_PATH", str(tmp_path / "config.json"))
+        db.set_net_heal_enabled(True)
+        assert db.get_net_heal_enabled() is True
+        db.set_net_heal_enabled(False)
+        assert db.get_net_heal_enabled() is False
+
+    def test_non_bool_value_read_as_none(self, tmp_path, monkeypatch):
+        cfg_path = tmp_path / "config.json"
+        cfg_path.write_text(json.dumps({"net_heal_enabled": "yes"}),
+                            encoding="utf-8")
+        monkeypatch.setattr(db, "CONFIG_PATH", str(cfg_path))
+        assert db.get_net_heal_enabled() is None

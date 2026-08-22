@@ -238,6 +238,22 @@ def set_zip_download_enabled(v: bool) -> None:
     save_config(cfg)
 
 
+# ── Net heal (обход DNS-блокировок) ──────────────────────
+
+
+def get_net_heal_enabled() -> Optional[bool]:
+    """Обход DNS-блокировок: true/false — выбор сделан,
+    None — пользователя ещё не спрашивали."""
+    v = load_config().get("net_heal_enabled")
+    return v if isinstance(v, bool) else None
+
+
+def set_net_heal_enabled(v: bool) -> None:
+    cfg = load_config()
+    cfg["net_heal_enabled"] = bool(v)
+    save_config(cfg)
+
+
 # ── All-files offset (докачка при обрыве) ────────────────
 
 
