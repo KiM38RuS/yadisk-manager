@@ -183,6 +183,13 @@ class SettingsDialog(QDialog):
             "как в Яндекс Диск 3.0. Новое обновление применится\n"
             "при следующем перезапуске программы.")
         frm4.addRow(self._chk_auto)
+        self._chk_net_heal = QCheckBox("Обход DNS-блокировок (DoH)")
+        self._chk_net_heal.setChecked(bool(db.get_net_heal_enabled()))
+        self._chk_net_heal.setToolTip(
+            "Если DNS вашей сети блокирует Яндекс.Диск, имена будут\n"
+            "резолвиться через DNS-over-HTTPS (Cloudflare/Google).\n"
+            "Работает без админ-прав и не меняет системные настройки.")
+        frm4.addRow(self._chk_net_heal)
         layout.addWidget(grp4)
 
         layout.addStretch()
@@ -244,6 +251,8 @@ class SettingsDialog(QDialog):
         db.set_update_beta_enabled(self._chk_beta.isChecked())
         # Сохранить настройку бесшумных обновлений
         db.set_auto_update_enabled(self._chk_auto.isChecked())
+        # Сохранить настройку обхода DNS-блокировок
+        db.set_net_heal_enabled(self._chk_net_heal.isChecked())
         # Тему НЕ переприменяем здесь: она уже применена вживую при выборе
         # в комбобоксе (_on_theme_changed). Повторный _apply_theme() при
         # закрытии диалога вызывает полный unpolish/polish всех виджетов,
