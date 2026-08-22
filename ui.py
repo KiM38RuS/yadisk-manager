@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 import db
 import disk_api
+import net_heal
 import sync
 import watcher
 from ipc import send_ipc_command, IPC_ENABLED
@@ -160,6 +161,11 @@ class MainWindow(QMainWindow):
         self._result_timer = QTimer(self)
         self._result_timer.timeout.connect(self._process_result_queue)
         self._result_timer.start(100)  # poll every 100ms
+
+        # ── net heal: события блокировок из воркер-потоков ─────
+        # Раз за сессию: вопрос «включить обход?» и подсказка про VPN.
+        self._vpn_hint_shown = False
+        self._dns_prompt_shown = False
 
         # Очередь и лимит для MetaFetch (проверка метаданных + MD5)
         self._meta_fetch_queue: list[tuple[str, str, str]] = []  # (cloud_path, local_path, last_sync_md5)
@@ -3045,6 +3051,7 @@ class MainWindow(QMainWindow):
 
     def _process_result_queue(self):
         """Обработать накопившиеся результаты скачиваний/загрузок (главный поток)."""
+        self._process_net_events()
         batch: list[tuple] = []
         while True:
             try:
@@ -3154,6 +3161,52 @@ class MainWindow(QMainWindow):
                and hasattr(self, '_current_path') and self._current_path:
                 self._uploads_refreshed = True
                 self._navigate_to_folder(self._current_path)
+
+    def _process_net_events(self):
+        """Разобрать события сетевых блокировок из net_heal (главный поток)."""
+        events = net_heal.drain_block_events()
+        if not events:
+            return
+        for _ts, kind, _host in events:
+            try:
+                self._route_net_event(kind)
+            except Exception:
+                logger.exception("net heal event routing failed")
+
+    def _route_net_event(self, kind):
+        """Реакция на блокировку: разовый вопрос про обход / подсказка про VPN."""
+        if kind == net_heal.NetIssue.DnsBlocked:
+            flag = db.get_net_heal_enabled()
+            if flag is None:
+                if self._dns_prompt_shown:
+                    return
+                self._dns_prompt_shown = True
+                answer = QMessageBox.question(
+                    self, "Обход DNS-блокировок",
+                    "DNS-сервер вашей сети не отвечает для Яндекс.Диска.\n\n"
+                    "Включить автоматический обход?\n\n"
+                    "(имена будут резолвиться через DNS-over-HTTPS,\n"
+                    "без изменения системных настроек)")
+                allowed = answer == QMessageBox.StandardButton.Yes
+                db.set_net_heal_enabled(allowed)
+                logger.info("Net heal: user answer = %s", allowed)
+            elif flag and not self._vpn_hint_shown:
+                self._show_vpn_hint()
+        else:  # NetIssue.TcpBlocked
+            if not self._vpn_hint_shown:
+                self._show_vpn_hint()
+
+    def _show_vpn_hint(self):
+        """Нейтральная подсказка про VPN — одна за сессию."""
+        self._vpn_hint_shown = True
+        logger.warning("Net heal: blocks persist — suggesting VPN")
+        try:
+            self._tray.showMessage(
+                "Ограничение сети",
+                "Доступ к Яндекс.Диску ограничен сетью. Попробуйте VPN.",
+                QSystemTrayIcon.Information, 8000)
+        except Exception:
+            pass  # трей недоступен — не критично
 
     def _refresh_folder_view(self):
         """Обновить текущий вид из БД — пересчитать статусы папок.

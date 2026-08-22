@@ -511,3 +511,77 @@ class TestDiskApiIntegration:
             "https://cloud-api.yandex.net/v1/disk")
         assert not isinstance(adapter, net_heal.HealedAdapter)
         assert isinstance(adapter, requests.adapters.HTTPAdapter)
+
+
+class TestUiReactions:
+    """Маршрутизация событий в MainWindow — лёгкий стаб без полного __init__."""
+
+    def _win(self):
+        import ui
+        win = ui.MainWindow.__new__(ui.MainWindow)
+        win._vpn_hint_shown = False
+        win._dns_prompt_shown = False
+        win._tray = MagicMock()
+        return win
+
+    def test_first_dns_block_asks_once_and_saves_yes(self, monkeypatch):
+        monkeypatch.setattr(db, "get_net_heal_enabled", lambda: None)
+        saved = {}
+        monkeypatch.setattr(db, "set_net_heal_enabled",
+                            lambda v: saved.update(v=v))
+        import ui as ui_mod
+        questions: list[int] = []
+
+        def fake_question(*a, **k):
+            questions.append(1)
+            return ui_mod.QMessageBox.StandardButton.Yes
+
+        monkeypatch.setattr(ui_mod.QMessageBox, "question",
+                            staticmethod(fake_question))
+        win = self._win()
+        win._route_net_event(NetIssue.DnsBlocked)
+        assert saved == {"v": True}
+        assert win._dns_prompt_shown is True
+        assert len(questions) == 1
+        # повторное событие — вопрос НЕ повторяется; но раз флаг уже True,
+        # а DoH так и не помог — по спеке показывается подсказка про VPN
+        monkeypatch.setattr(db, "get_net_heal_enabled", lambda: True)
+        win._route_net_event(NetIssue.DnsBlocked)
+        assert len(questions) == 1
+        assert win._tray.showMessage.call_count == 1
+
+    def test_user_decline_is_final(self, monkeypatch):
+        monkeypatch.setattr(db, "get_net_heal_enabled", lambda: None)
+        saved = {}
+        monkeypatch.setattr(db, "set_net_heal_enabled",
+                            lambda v: saved.update(v=v))
+        import ui as ui_mod
+        monkeypatch.setattr(ui_mod.QMessageBox, "question",
+                            staticmethod(lambda *a, **k:
+                                         ui_mod.QMessageBox.StandardButton.No))
+        win = self._win()
+        win._route_net_event(NetIssue.DnsBlocked)
+        assert saved == {"v": False}
+
+    def test_vpn_hint_shown_once_per_session(self, monkeypatch):
+        monkeypatch.setattr(db, "get_net_heal_enabled", lambda: True)
+        win = self._win()
+        win._route_net_event(NetIssue.TcpBlocked)
+        win._route_net_event(NetIssue.TcpBlocked)
+        win._route_net_event(NetIssue.DnsBlocked)  # DoH умер при включённом обходе
+        assert win._vpn_hint_shown is True
+        assert win._tray.showMessage.call_count == 1
+
+    def test_declined_flag_no_vpn_hint_on_dns(self, monkeypatch):
+        monkeypatch.setattr(db, "get_net_heal_enabled", lambda: False)
+        win = self._win()
+        win._route_net_event(NetIssue.DnsBlocked)
+        assert win._tray.showMessage.call_count == 0
+
+    def test_process_net_events_drains_queue(self, monkeypatch):
+        monkeypatch.setattr(db, "get_net_heal_enabled", lambda: True)
+        record_block_event(NetIssue.TcpBlocked, "h.test")
+        win = self._win()
+        win._process_net_events()
+        assert win._tray.showMessage.call_count == 1
+        assert drain_block_events() == []  # очередь разобрана
