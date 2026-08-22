@@ -496,3 +496,18 @@ class TestHealedAdapterWiring:
         assert net_heal.STATE.enabled_fn is fn
         assert net_heal.STATE.cache is cache
         assert net_heal.STATE.resolver is resolver
+
+
+class TestDiskApiIntegration:
+    def test_mounts_healed_adapter_when_fn_passed(self, heal_state):
+        api = disk_api.YaDiskAPI("tok", net_heal_enabled_fn=lambda: True)
+        adapter = api._session.get_adapter(
+            "https://cloud-api.yandex.net/v1/disk")
+        assert isinstance(adapter, net_heal.HealedAdapter)
+
+    def test_plain_adapter_without_fn(self, heal_state):
+        api = disk_api.YaDiskAPI("tok")
+        adapter = api._session.get_adapter(
+            "https://cloud-api.yandex.net/v1/disk")
+        assert not isinstance(adapter, net_heal.HealedAdapter)
+        assert isinstance(adapter, requests.adapters.HTTPAdapter)

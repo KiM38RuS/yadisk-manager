@@ -12,6 +12,8 @@ from urllib.parse import quote
 
 import requests
 
+import net_heal
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://cloud-api.yandex.net/v1/disk"
@@ -59,13 +61,20 @@ class AuthError(YaDiskError):
 class YaDiskAPI:
     """Тонкая обёртка над REST API Яндекс.Диска."""
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, net_heal_enabled_fn=None):
         self.token = token
         self._session = requests.Session()
         # Увеличиваем пул соединений — 35+ одновременных скачиваний не должны
         # блокироваться стандартным pool_connections=10
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=30, pool_maxsize=30)
+        if net_heal_enabled_fn is not None:
+            # Обход DNS/TCP-блокировок: системный DNS первый, при сбое —
+            # кэш IP / DNS-over-HTTPS (см. net_heal.py).
+            adapter = net_heal.HealedAdapter(
+                pool_connections=30, pool_maxsize=30,
+                enabled_fn=net_heal_enabled_fn)
+        else:
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=30, pool_maxsize=30)
         self._session.mount("https://", adapter)
         self._rate_limiter = _RateLimiter()
         self._session.headers.update({

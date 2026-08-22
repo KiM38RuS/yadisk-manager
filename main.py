@@ -142,7 +142,8 @@ def main():
         db.set_token(token)
 
     # ── инициализация API (без блокирующих вызовов) ───────
-    api = disk_api.YaDiskAPI(token)
+    api = disk_api.YaDiskAPI(
+        token, net_heal_enabled_fn=lambda: db.get_net_heal_enabled() is True)
     database = db.Database()
 
     # ── выбор папки кеша ───────────────────────────────────
