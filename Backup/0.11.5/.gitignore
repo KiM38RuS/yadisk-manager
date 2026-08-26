@@ -1,0 +1,53 @@
+# === Безопасность ===
+config.json               # OAuth-токен Яндекс.Диска
+.env                      # Переменные окружения
+
+# === База данных ===
+yadisk.db                 # SQLite-БД (регенерируется)
+*.db
+
+# === Python-кеш ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === Виртуальное окружение ===
+.venv/
+venv/
+env/
+
+# === Артефакты сборки ===
+dist/
+build/
+*.spec
+YaDiskManager.exe          # собранный exe — в GitHub Releases, не в репо
+
+# === Резервные копии файлов ===
+*.bak
+
+# === Системное ===
+.DS_Store
+Thumbs.db
+
+# === Логи ===
+logs/
+LOG.txt
+
+# === Экспериментальные тесты и референсы ===
+Test/
+tests/
+bookmarks_tests/
+icon-dev/
+Reference/
+ПЛАНЫ.md
+
+# === Бэкапы версий ===
+Backup/
+
+# === Внутренние конфиги агентов ===
+.claude/
+.pi/
+
+# === Кеш тестов ===
+.pytest_cache/

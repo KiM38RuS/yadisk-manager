@@ -58,6 +58,14 @@ class AuthError(YaDiskError):
     """Ошибка авторизации — токен недействителен."""
 
 
+def _error_message(resp) -> str:
+    """Извлечь текст ошибки; тело может быть не-JSON (HTML от прокси/CDN)."""
+    try:
+        return resp.json().get("message", resp.text)
+    except ValueError:
+        return resp.text
+
+
 class YaDiskAPI:
     """Тонкая обёртка над REST API Яндекс.Диска."""
 
@@ -134,18 +142,19 @@ class YaDiskAPI:
                 continue
 
             if resp.status_code == 401:
-                msg = resp.json().get("message", resp.text) if resp.content else ""
-                raise AuthError(f"HTTP {resp.status_code}: {msg}")
+                raise AuthError(f"HTTP {resp.status_code}: {_error_message(resp)}")
 
             if resp.status_code >= 400:
-                msg = resp.json().get("message", resp.text) if resp.content else ""
-                raise YaDiskError(f"HTTP {resp.status_code}: {msg}")
+                raise YaDiskError(f"HTTP {resp.status_code}: {_error_message(resp)}")
 
             # 204 No Content — нет тела
             if resp.status_code == 204:
                 return {}
 
-            return resp.json()
+            try:
+                return resp.json()
+            except ValueError as e:
+                raise YaDiskError(f"Invalid JSON response: {e}") from e
 
         raise YaDiskError("Max retries exceeded")
 
@@ -251,12 +260,21 @@ class YaDiskAPI:
     def download_file(self, path: str, local_path: str) -> None:
         """Скачать файл с Диска в локальный файл."""
         href = self.get_download_url(path)
-        resp = self._session.get(href, stream=True, timeout=60)
-        resp.raise_for_status()
-        with open(local_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+        try:
+            with self._session.get(href, stream=True, timeout=60) as resp:
+                resp.raise_for_status()
+                with open(local_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+        except Exception:
+            # Не оставляем недокачанный файл
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+            except OSError:
+                pass
+            raise
 
     def get_upload_url(self, path: str) -> str:
         """Временная ссылка для загрузки файла."""
@@ -340,8 +358,7 @@ class YaDiskAPI:
             f"&path={quote(dst, safe='')}"
             f"&overwrite={'true' if overwrite else 'false'}",
         )
-        if data and "operation_id" in data:
-            self._wait_operation(data["operation_id"])
+        self._wait_operation_link(data)
 
     def copy(self, src: str, dst: str, overwrite: bool = False) -> None:
         """Скопировать. Дожидается завершения async-операции."""
@@ -351,16 +368,46 @@ class YaDiskAPI:
             f"&path={quote(dst, safe='')}"
             f"&overwrite={'true' if overwrite else 'false'}",
         )
-        if data and "operation_id" in data:
-            self._wait_operation(data["operation_id"])
+        self._wait_operation_link(data)
+
+    @staticmethod
+    def _operation_id_from_link(data: Optional[dict]) -> Optional[str]:
+        """Достать operation_id из 202-ответа.
+
+        API возвращает Link-объект {"href": ".../operations/<id>"} без
+        отдельного поля operation_id — id берём из хвоста href.
+        """
+        if not data:
+            return None
+        op_id = data.get("operation_id")
+        if op_id:
+            return str(op_id)
+        href = data.get("href") or ""
+        if "/operations/" in href:
+            return href.rstrip("/").rsplit("/", 1)[-1] or None
+        return None
+
+    def _wait_operation_link(self, data: Optional[dict]) -> None:
+        """Если ответ содержит ссылку на операцию — дождаться её завершения."""
+        op_id = self._operation_id_from_link(data)
+        if op_id:
+            self._wait_operation(op_id)
 
     # ── публичная ссылка ─────────────────────────────────
 
     def publish(self, path: str) -> str:
-        """Сделать файл публичным и вернуть ссылку."""
-        data = self._request(
+        """Сделать файл публичным и вернуть ссылку.
+
+        PUT /publish отвечает 202 с Link-объектом операции — сам public_url
+        появляется в метаданных ресурса, поэтому дочитываем его через GET.
+        """
+        self._request(
             "PUT",
             f"/resources/publish?path={quote(path, safe='')}",
+        )
+        data = self._request(
+            "GET",
+            f"/resources?path={quote(path, safe='')}&fields=public_url",
         )
         return data.get("public_url", "")
 

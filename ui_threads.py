@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import shutil
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QThread, Signal
 
@@ -823,6 +824,7 @@ class InternalDropThread(QThread):
         success = 0
         errors: list[str] = []
         processed: list[tuple[str, str]] = []
+        failed: list[tuple[str, str]] = []
 
         for src, new_path in self._items:
             name = os.path.basename(src.rstrip("/"))
@@ -835,10 +837,12 @@ class InternalDropThread(QThread):
                 success += 1
             except Exception as e:
                 errors.append(f"{name}: {e}")
+                failed.append((src, new_path))
 
         self.finished.emit({
             "success": success, "errors": errors,
-            "processed": processed, "is_move": self._is_move,
+            "processed": processed, "failed": failed,
+            "is_move": self._is_move,
         })
 
 

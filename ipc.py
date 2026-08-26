@@ -13,6 +13,7 @@ IPC — управление YaDisk Manager из командной строки
 import json
 import logging
 import socket
+import sys
 import threading
 from queue import Queue
 
@@ -21,7 +22,7 @@ logger = logging.getLogger("ipc")
 # ⚠️ Перед релизом/компиляцией выставить False
 # В разработке держать True — позволяет перезагружать программу
 # через: python -c "from ipc import send_ipc_command; send_ipc_command('restart')"
-IPC_ENABLED = True
+IPC_ENABLED = False
 
 IPC_PORT = 43210
 
@@ -36,7 +37,12 @@ def start_ipc_server(window_ref) -> None:
 
     def _serve():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            # SO_REUSEADDR на Windows допускает двойной bind — ломает
+            # single-instance guard (второй экземпляр перехватывает порт)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             srv.bind(('127.0.0.1', IPC_PORT))
         except OSError as e:

@@ -3,7 +3,7 @@
 > Identity: Python developer, PySide6 GUI, REST API integrations.
 > Language: user speaks Russian, code/replies in Russian or English.
 > Knowledge base root: `D:\\YandexDisk\\Sync\\Coding\\AIWikiVault`
-> Current version: **0.11.10** (see `Backup/` for history)
+> Current version: **0.11.11** (see `Backup/` for history)
 >
 > ## 📦 Версии и бэкапы
 >
@@ -96,6 +96,9 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 - Релиз на GitHub: тег `v0.11.x` + ассеты `YaDiskManager.exe` (обязательно) и `Setup_YaDiskManager_v*.exe` (инсталлер, опционально). Апдейтер ищет ассет с именем, оканчивающимся на `.exe` и не содержащим `setup`.
 - Обновление применяется только в frozen-режиме (exe): скачивание в `YaDiskManager.new.exe` рядом с текущим, скрытый `apply_update.bat` ждёт выхода приложения, переименовывает и запускает новый exe. В dev-режиме — только скачивание в temp.
 - Авто-проверка: через 20 сек после старта и каждые 4 часа; уведомление в трее; настройка в Настройках (по умолчанию вкл.).
+- **Все релизы выпускаются как pre-release** (пользователь не хочет «сырые» версии под видом обычного релиза).
+- **Галочка «Обновляться до бета-версий» включена по умолчанию** (`db.py: get_update_beta_enabled()` → `load_config().get("update_beta_enabled", True)`): GitHub `/releases/latest` НЕ отдаёт pre-release (404, если нет обычных релизов), поэтому апдейтер должен всегда ходить в `/releases?per_page=10` и брать свежую не-draft запись.
+- **Перед релизом с pre-release** проверить, что `update_beta_enabled` по умолчанию `True` (иначе пользователи без галочки не увидят обновление). При выпуске обычного (stable) релиза — вернуть дефолт `False`.
 
 ### 📋 Цикл релиза (чек-лист)
 

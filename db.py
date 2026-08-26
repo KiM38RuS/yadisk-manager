@@ -24,6 +24,23 @@ CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+def _escape_like(path: str) -> str:
+    """Экранировать спецсимволы LIKE (% _ \\) в облачном пути.
+
+    Без экранирования "my_folder" матчится с "myXfolder" —
+    в sync_children_from_api это приводило к удалению чужих записей.
+    Использовать вместе с ESCAPE '\\' в SQL.
+    """
+    return path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _like_children_pattern(prefix: str) -> str:
+    """LIKE-паттерн 'prefix/...' с экранированием спецсимволов."""
+    safe = _escape_like(prefix)
+    return (safe + "/%") if prefix else "/%"
+
+
 # ── Config (JSON) ────────────────────────────────────────
 
 _config_lock = threading.Lock()
@@ -49,6 +66,34 @@ def load_config() -> dict:
         _config_lock.release()
 
 
+def _write_config_unlocked(cfg: dict) -> bool:
+    """Атомарно записать конфиг (лок уже удерживается вызывающим)."""
+    tmp_path = CONFIG_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        logger.warning("config.json: write failed: %s", e)
+        return False
+    # Windows: os.replace требует право удаления файла-назначения. Если
+    # config.json в этот момент открыт другим процессом (второй экземпляр
+    # приложения), возникает PermissionError (WinError 32). Повторяем с
+    # короткими паузами; при неудаче — не роняем closeEvent, а логируем.
+    for attempt in range(3):
+        try:
+            os.replace(tmp_path, CONFIG_PATH)
+            return True
+        except PermissionError:
+            if attempt < 2:
+                _time.sleep(0.05)
+    logger.warning(
+        "config.json: replace failed (file busy by another process) — "
+        "config NOT saved; tmp left at %s", tmp_path)
+    return False
+
+
 def save_config(cfg: dict) -> None:
     """Сохранить конфиг в атомарной записи."""
     if not _config_lock.acquire(timeout=_CONFIG_LOCK_TIMEOUT_S):
@@ -57,26 +102,45 @@ def save_config(cfg: dict) -> None:
             _CONFIG_LOCK_TIMEOUT_S)
         return
     try:
-        # Атомарная запись: сначала во временный файл, потом переименовать
-        tmp_path = CONFIG_PATH + ".tmp"
-        with open(tmp_path, "w") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        # Windows: os.replace требует право удаления файла-назначения. Если
-        # config.json в этот момент открыт другим процессом (второй экземпляр
-        # приложения), возникает PermissionError (WinError 32). Повторяем с
-        # короткими паузами; при неудаче — не роняем closeEvent, а логируем.
-        for attempt in range(3):
-            try:
-                os.replace(tmp_path, CONFIG_PATH)
-                return
-            except PermissionError:
-                if attempt < 2:
-                    _time.sleep(0.05)
+        _write_config_unlocked(cfg)
+    finally:
+        _config_lock.release()
+
+
+def update_config(key: str, value) -> None:
+    """Атомарно обновить один ключ конфига (read-modify-write под одним локом).
+
+    В отличие от пары load_config()+save_config() не затирает остальные
+    ключи (включая token) ни при таймауте блокировки, ни при гонке потоков.
+    """
+    _mutate_config(key, value)
+
+
+def remove_config(key: str) -> None:
+    """Атомарно удалить ключ из конфига."""
+    _mutate_config(key, None, remove=True)
+
+
+def _mutate_config(key: str, value, remove: bool = False) -> None:
+    if not _config_lock.acquire(timeout=_CONFIG_LOCK_TIMEOUT_S):
         logger.warning(
-            "config.json: replace failed (file busy by another process) — "
-            "config NOT saved; tmp left at %s", tmp_path)
+            "config.json: lock timeout (%ss) — key %r skipped",
+            _CONFIG_LOCK_TIMEOUT_S, key)
+        return
+    try:
+        cfg = {}
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    cfg = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("config.json: unreadable (%s) — rewriting", e)
+                cfg = {}
+        if remove:
+            cfg.pop(key, None)
+        else:
+            cfg[key] = value
+        _write_config_unlocked(cfg)
     finally:
         _config_lock.release()
 
@@ -86,9 +150,7 @@ def get_token() -> Optional[str]:
 
 
 def set_token(token: str) -> None:
-    cfg = load_config()
-    cfg["token"] = token
-    save_config(cfg)
+    update_config("token", token)
 
 
 def get_cache_dir() -> str:
@@ -98,9 +160,7 @@ def get_cache_dir() -> str:
 # ── Database ─────────────────────────────────────────────
 
 def set_cache_dir(path: str) -> None:
-    cfg = load_config()
-    cfg["cache_dir"] = path
-    save_config(cfg)
+    update_config("cache_dir", path)
 
 
 # ── Theme ───────────────────────────────────────────────
@@ -127,9 +187,7 @@ def get_theme() -> str:
 
 def set_theme(theme: str) -> None:
     _theme_cache["val"] = None  # инвалидация кеша
-    cfg = load_config()
-    cfg["theme"] = theme
-    save_config(cfg)
+    update_config("theme", theme)
 
 
 # ── Window geometry ────────────────────────────────────────
@@ -140,12 +198,10 @@ def get_window_geometry() -> str:
 
 
 def set_window_geometry(data: str) -> None:
-    cfg = load_config()
     if data:
-        cfg["window_geometry"] = data
+        update_config("window_geometry", data)
     else:
-        cfg.pop("window_geometry", None)
-    save_config(cfg)
+        remove_config("window_geometry")
 
 
 def get_save_window_geometry() -> bool:
@@ -153,9 +209,7 @@ def get_save_window_geometry() -> bool:
 
 
 def set_save_window_geometry(v: bool) -> None:
-    cfg = load_config()
-    cfg["save_window_geometry"] = v
-    save_config(cfg)
+    update_config("save_window_geometry", v)
 
 
 def get_show_log() -> bool:
@@ -164,9 +218,7 @@ def get_show_log() -> bool:
 
 
 def set_show_log(v: bool) -> None:
-    cfg = load_config()
-    cfg["show_log"] = v
-    save_config(cfg)
+    update_config("show_log", v)
 
 
 def get_show_log_on_startup() -> bool:
@@ -175,9 +227,7 @@ def get_show_log_on_startup() -> bool:
 
 
 def set_show_log_on_startup(v: bool) -> None:
-    cfg = load_config()
-    cfg["show_log_on_startup"] = v
-    save_config(cfg)
+    update_config("show_log_on_startup", v)
 
 
 def get_check_updates_enabled() -> bool:
@@ -186,20 +236,16 @@ def get_check_updates_enabled() -> bool:
 
 
 def set_check_updates_enabled(v: bool) -> None:
-    cfg = load_config()
-    cfg["check_updates_enabled"] = v
-    save_config(cfg)
+    update_config("check_updates_enabled", v)
 
 
 def get_update_beta_enabled() -> bool:
-    """Обновляться до бета-версий (pre-release с GitHub). По умолчанию выкл."""
-    return load_config().get("update_beta_enabled", False)
+    """Обновляться до бета-версий (pre-release с GitHub). По умолчанию вкл (все релизы — pre-release)."""
+    return load_config().get("update_beta_enabled", True)
 
 
 def set_update_beta_enabled(v: bool) -> None:
-    cfg = load_config()
-    cfg["update_beta_enabled"] = v
-    save_config(cfg)
+    update_config("update_beta_enabled", v)
 
 
 def get_auto_update_enabled() -> bool:
@@ -208,9 +254,7 @@ def get_auto_update_enabled() -> bool:
 
 
 def set_auto_update_enabled(v: bool) -> None:
-    cfg = load_config()
-    cfg["auto_update_enabled"] = v
-    save_config(cfg)
+    update_config("auto_update_enabled", v)
 
 
 def get_log_window_geometry() -> str:
@@ -219,12 +263,10 @@ def get_log_window_geometry() -> str:
 
 
 def set_log_window_geometry(data: str) -> None:
-    cfg = load_config()
     if data:
-        cfg["log_window_geometry"] = data
+        update_config("log_window_geometry", data)
     else:
-        cfg.pop("log_window_geometry", None)
-    save_config(cfg)
+        remove_config("log_window_geometry")
 
 
 def get_zip_download_enabled() -> bool:
@@ -233,9 +275,7 @@ def get_zip_download_enabled() -> bool:
 
 
 def set_zip_download_enabled(v: bool) -> None:
-    cfg = load_config()
-    cfg["zip_download_enabled"] = v
-    save_config(cfg)
+    update_config("zip_download_enabled", v)
 
 
 # ── Net heal (обход DNS-блокировок) ──────────────────────
@@ -249,9 +289,7 @@ def get_net_heal_enabled() -> Optional[bool]:
 
 
 def set_net_heal_enabled(v: bool) -> None:
-    cfg = load_config()
-    cfg["net_heal_enabled"] = bool(v)
-    save_config(cfg)
+    update_config("net_heal_enabled", bool(v))
 
 
 # ── All-files offset (докачка при обрыве) ────────────────
@@ -266,12 +304,10 @@ def get_all_files_offset() -> int:
 
 def set_all_files_offset(offset: int) -> None:
     """Сохранить/сбросить offset докачки файлов."""
-    cfg = load_config()
     if offset > 0:
-        cfg["all_files_offset"] = offset
+        update_config("all_files_offset", offset)
     else:
-        cfg.pop("all_files_offset", None)
-    save_config(cfg)
+        remove_config("all_files_offset")
 
 
 # ── Database (SQLite) ────────────────────────────────────
@@ -521,30 +557,34 @@ class Database:
         now = _now()
         with self._lock:
             self._conn.execute("BEGIN TRANSACTION")
-            for item in file_list:
-                self._conn.execute("""
-                    INSERT INTO files (cloud_path, name, type, mime_type, size,
-                                       modified, md5, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(cloud_path) DO UPDATE SET
-                        name=excluded.name,
-                        type=excluded.type,
-                        mime_type=excluded.mime_type,
-                        size=excluded.size,
-                        modified=excluded.modified,
-                        md5=excluded.md5,
-                        updated_at=excluded.updated_at
-                """, (
-                    item["path"],
-                    item["name"],
-                    item["type"],
-                    item.get("mime_type", ""),
-                    item.get("size", 0),
-                    item.get("modified", ""),
-                    item.get("md5", ""),
-                    now,
-                ))
-            self._conn.commit()
+            try:
+                for item in file_list:
+                    self._conn.execute("""
+                        INSERT INTO files (cloud_path, name, type, mime_type, size,
+                                           modified, md5, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(cloud_path) DO UPDATE SET
+                            name=excluded.name,
+                            type=excluded.type,
+                            mime_type=excluded.mime_type,
+                            size=excluded.size,
+                            modified=excluded.modified,
+                            md5=excluded.md5,
+                            updated_at=excluded.updated_at
+                    """, (
+                        item["path"],
+                        item["name"],
+                        item["type"],
+                        item.get("mime_type", ""),
+                        item.get("size", 0),
+                        item.get("modified", ""),
+                        item.get("md5", ""),
+                        now,
+                    ))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def sync_children_from_api(self, parent_path: str, api_items: list[dict]) -> None:
         """Синхронизировать БД с ответом API.
@@ -559,79 +599,83 @@ class Database:
         now = _now()
         api_paths = {item["path"] for item in api_items}
         prefix = parent_path.rstrip("/")
-        pattern = prefix + "/%" if prefix else "/%"
+        pattern = _like_children_pattern(prefix)
 
         with self._lock:
             self._conn.execute("BEGIN TRANSACTION")
-            # === Шаг 1: находим "защищённые" папки — те, у которых есть потомки
-            # с local_path IS NOT NULL. Эти папки существуют локально,
-            # даже если API их не вернул, и их удалять нельзя.
-            protected_rows = self._conn.execute("""\
-                SELECT DISTINCT sub_parent.parent_cloud
-                FROM (
-                    SELECT substr(f.cloud_path, 1,
-                        CASE WHEN instr(substr(f.cloud_path, ?), '/') > 0
-                             THEN ? + instr(substr(f.cloud_path, ?), '/') - 1
-                             ELSE NULL
-                        END
-                    ) AS parent_cloud
-                    FROM files f
-                    WHERE f.cloud_path LIKE ?
-                      AND f.cloud_path != ?
-                      AND f.local_path IS NOT NULL
-                      AND f.local_path != ''
-                ) sub_parent
-            """, (len(prefix) + 2, len(prefix) + 2, len(prefix) + 2,
-                  pattern, parent_path)).fetchall()
-            protected_dirs = {r[0] for r in protected_rows}
+            try:
+                # === Шаг 1: находим "защищённые" папки — те, у которых есть потомки
+                # с local_path IS NOT NULL. Эти папки существуют локально,
+                # даже если API их не вернул, и их удалять нельзя.
+                protected_rows = self._conn.execute("""\
+                    SELECT DISTINCT sub_parent.parent_cloud
+                    FROM (
+                        SELECT substr(f.cloud_path, 1,
+                            CASE WHEN instr(substr(f.cloud_path, ?), '/') > 0
+                                 THEN ? + instr(substr(f.cloud_path, ?), '/') - 2
+                                 ELSE NULL
+                            END
+                        ) AS parent_cloud
+                        FROM files f
+                        WHERE f.cloud_path LIKE ? ESCAPE '\\'
+                          AND f.cloud_path != ?
+                          AND f.local_path IS NOT NULL
+                          AND f.local_path != ''
+                    ) sub_parent
+                """, (len(prefix) + 2, len(prefix) + 2, len(prefix) + 2,
+                      pattern, parent_path)).fetchall()
+                protected_dirs = {r[0] for r in protected_rows}
 
-            # === Шаг 2: находим детей для удаления (нет в API, не syncing,
-            # нет local_path, не защищённая папка)
-            rows = self._conn.execute("""\
-                SELECT cloud_path FROM files
-                WHERE cloud_path LIKE ?
-                  AND cloud_path != ?
-                  AND cloud_path NOT LIKE ?
-                  AND status != 'syncing'
-                  AND (local_path IS NULL OR local_path = '')
-            """, (pattern, parent_path, pattern + "/%")).fetchall()
-            to_delete = [r["cloud_path"] for r in rows
-                         if r["cloud_path"] not in api_paths
-                         and r["cloud_path"] not in protected_dirs]
-            if to_delete:
-                placeholders = ",".join("?" for _ in to_delete)
-                self._conn.execute(
-                    f"DELETE FROM files WHERE cloud_path IN ({placeholders})",
-                    to_delete,
-                )
-                logger.info("DB: pruned %d stale children from %s (%s)",
-                            len(to_delete), parent_path,
-                            ", ".join(p.rsplit("/", 1)[-1] for p in to_delete[:5]))
-            # Upsert API items
-            for item in api_items:
-                self._conn.execute("""
-                    INSERT INTO files (cloud_path, name, type, mime_type, size,
-                                       modified, md5, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(cloud_path) DO UPDATE SET
-                        name=excluded.name,
-                        type=excluded.type,
-                        mime_type=excluded.mime_type,
-                        size=excluded.size,
-                        modified=excluded.modified,
-                        md5=excluded.md5,
-                        updated_at=excluded.updated_at
-                """, (
-                    item["path"],
-                    item["name"],
-                    item["type"],
-                    item.get("mime_type", ""),
-                    item.get("size", 0),
-                    item.get("modified", ""),
-                    item.get("md5", ""),
-                    now,
-                ))
-            self._conn.commit()
+                # === Шаг 2: находим детей для удаления (нет в API, не syncing,
+                # нет local_path, не защищённая папка)
+                rows = self._conn.execute("""\
+                    SELECT cloud_path FROM files
+                    WHERE cloud_path LIKE ? ESCAPE '\\'
+                      AND cloud_path != ?
+                      AND cloud_path NOT LIKE ? ESCAPE '\\'
+                      AND status != 'syncing'
+                      AND (local_path IS NULL OR local_path = '')
+                """, (pattern, parent_path, pattern + "/%")).fetchall()
+                to_delete = [r["cloud_path"] for r in rows
+                             if r["cloud_path"] not in api_paths
+                             and r["cloud_path"] not in protected_dirs]
+                if to_delete:
+                    placeholders = ",".join("?" for _ in to_delete)
+                    self._conn.execute(
+                        f"DELETE FROM files WHERE cloud_path IN ({placeholders})",
+                        to_delete,
+                    )
+                    logger.info("DB: pruned %d stale children from %s (%s)",
+                                len(to_delete), parent_path,
+                                ", ".join(p.rsplit("/", 1)[-1] for p in to_delete[:5]))
+                # Upsert API items
+                for item in api_items:
+                    self._conn.execute("""
+                        INSERT INTO files (cloud_path, name, type, mime_type, size,
+                                           modified, md5, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(cloud_path) DO UPDATE SET
+                            name=excluded.name,
+                            type=excluded.type,
+                            mime_type=excluded.mime_type,
+                            size=excluded.size,
+                            modified=excluded.modified,
+                            md5=excluded.md5,
+                            updated_at=excluded.updated_at
+                    """, (
+                        item["path"],
+                        item["name"],
+                        item["type"],
+                        item.get("mime_type", ""),
+                        item.get("size", 0),
+                        item.get("modified", ""),
+                        item.get("md5", ""),
+                        now,
+                    ))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
         # После prune/upsert: создаём недостающие записи папок,
         # которые существуют локально (есть файлы с local_path),
@@ -650,12 +694,12 @@ class Database:
         и для каждой отсутствующей создаёт запись в БД.
         """
         prefix = parent_path.rstrip("/")
-        pattern = prefix + "/%" if prefix else "/%"
+        pattern = _like_children_pattern(prefix)
         with self._lock:
             # Все файлы с local_path под этой папкой
             rows = self._conn.execute("""\
                 SELECT cloud_path FROM files
-                WHERE cloud_path LIKE ?
+                WHERE cloud_path LIKE ? ESCAPE '\\'
                   AND cloud_path != ?
                   AND local_path IS NOT NULL
                   AND local_path != ''
@@ -680,14 +724,18 @@ class Database:
             if not missing:
                 return
             now = _now()
-            for d in missing:
-                name = d.rsplit("/", 1)[-1]
-                self._conn.execute("""\
-                    INSERT INTO files (cloud_path, name, type, status, updated_at)
-                    VALUES (?, ?, 'dir', 'downloaded', ?)
-                    ON CONFLICT(cloud_path) DO NOTHING
-                """, (d, name, now))
-            self._conn.commit()
+            try:
+                for d in missing:
+                    name = d.rsplit("/", 1)[-1]
+                    self._conn.execute("""\
+                        INSERT INTO files (cloud_path, name, type, status, updated_at)
+                        VALUES (?, ?, 'dir', 'downloaded', ?)
+                        ON CONFLICT(cloud_path) DO NOTHING
+                    """, (d, name, now))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
             logger.info("DB: created %d missing dir entries under %s", len(missing), parent_path)
 
     def upsert_file(self, cloud_path: str, name: str, type_: str,
@@ -814,8 +862,9 @@ class Database:
     def get_all_files(self) -> list[dict]:
         """Все отслеживаемые файлы."""
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM files ORDER BY cloud_path")
-        return [dict(r) for r in rows.fetchall()]
+            rows = self._conn.execute(
+                "SELECT * FROM files ORDER BY cloud_path").fetchall()
+        return [dict(r) for r in rows]
 
     def get_changed_downloaded_files(self) -> list[dict]:
         """Файлы со статусом downloaded, у которых cloud MD5 != last_sync_md5."""
@@ -826,16 +875,16 @@ class Database:
                   AND md5 IS NOT NULL AND md5 != ''
                   AND last_sync_md5 IS NOT NULL AND last_sync_md5 != ''
                   AND md5 != last_sync_md5
-            """)
-        return [dict(r) for r in rows.fetchall()]
+            """).fetchall()
+        return [dict(r) for r in rows]
 
     def get_by_status(self, status: str) -> list[dict]:
         """Файлы по статусу."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM files WHERE status=?", (status,)
-            )
-        return [dict(r) for r in rows.fetchall()]
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def count_by_status(self, status: str) -> int:
         """Количество файлов с указанным статусом (легковесный COUNT)."""
@@ -854,20 +903,21 @@ class Database:
         """
         prefix = folder_path.rstrip("/")
         if prefix:
-            pattern_dir = prefix + "/%"
-            pattern_deep = prefix + "/%/%"
+            safe_prefix = _escape_like(prefix)
+            pattern_dir = safe_prefix + "/%"
+            pattern_deep = safe_prefix + "/%/%"
         else:
             pattern_dir = "/%"
             pattern_deep = "/%/%"
         with self._lock:
             rows = self._conn.execute("""
                 SELECT * FROM files
-                WHERE cloud_path LIKE ?
+                WHERE cloud_path LIKE ? ESCAPE '\\'
                   AND cloud_path != ?
-                  AND cloud_path NOT LIKE ?
+                  AND cloud_path NOT LIKE ? ESCAPE '\\'
                 ORDER BY type DESC, name ASC
-            """, (pattern_dir, folder_path, pattern_deep))
-        return [dict(r) for r in rows.fetchall()]
+            """, (pattern_dir, folder_path, pattern_deep)).fetchall()
+        return [dict(r) for r in rows]
 
     def get_dir_tree_levels(self, parent_path: str) -> tuple[list[dict], set[str]]:
         """Прямые подпапки parent_path + множество тех, у кого есть свои подпапки.
@@ -925,13 +975,13 @@ class Database:
         Подпапки не учитываются — только файлы.
         """
         prefix = folder_path.rstrip("/")
-        pattern = prefix + "/%" if prefix else "/%"
+        pattern = _like_children_pattern(prefix)
         row = self._read_conn.execute("""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN status='downloaded' THEN 1 ELSE 0 END) as synced
             FROM files
-            WHERE cloud_path LIKE ?
+            WHERE cloud_path LIKE ? ESCAPE '\\'
               AND cloud_path != ?
               AND type = 'file'
         """, (pattern, folder_path)).fetchone()
@@ -962,10 +1012,10 @@ class Database:
             if cached is not None:
                 return cached
         prefix = folder_path.rstrip("/")
-        pattern = prefix + "/%" if prefix else "/%"
+        pattern = _like_children_pattern(prefix)
         rows = self._read_conn.execute("""
             SELECT status, COUNT(*) as cnt FROM files
-            WHERE cloud_path LIKE ?
+            WHERE cloud_path LIKE ? ESCAPE '\\'
               AND cloud_path != ?
               AND type = 'file'
             GROUP BY status
@@ -1022,12 +1072,12 @@ class Database:
         """
         prefix = parent_path.rstrip("/")
         slash_len = len(prefix) + 1 if prefix else 1
-        pattern = prefix + "/%" if prefix else "/%"
+        pattern = _like_children_pattern(prefix)
 
         with self._lock:
             rows = self._conn.execute("""
                 SELECT cloud_path, status FROM files
-                WHERE cloud_path LIKE ?
+                WHERE cloud_path LIKE ? ESCAPE '\\'
                   AND cloud_path != ?
                   AND type = 'file'
             """, (pattern, parent_path if parent_path != "/" else "/")).fetchall()
@@ -1049,14 +1099,23 @@ class Database:
 
         with self._folder_cache_lock:
             for folder, st in acc.items():
-                if "syncing" in st:
+                if "deleting" in st:
+                    self._folder_status_cache[folder] = "deleting"
+                elif "syncing" in st:
                     self._folder_status_cache[folder] = "syncing"
-                elif "cloud_only" in st and "downloaded" not in st:
-                    self._folder_status_cache[folder] = "cloud_only"
-                elif "cloud_only" in st:
+                elif ("cloud_only" in st and "downloaded" in st) \
+                        or ("modified" in st and "downloaded" in st):
                     self._folder_status_cache[folder] = "partial"
-                else:
+                elif "modified" in st:
+                    self._folder_status_cache[folder] = "modified"
+                elif "cloud_only" in st:
+                    self._folder_status_cache[folder] = "cloud_only"
+                elif "unknown" in st:
+                    self._folder_status_cache[folder] = "unknown"
+                elif "downloaded" in st:
                     self._folder_status_cache[folder] = "downloaded"
+                else:
+                    self._folder_status_cache[folder] = "cloud_only"
             # Для папок, в которых нет файлов — кешируем cloud_only
             if folder_paths:
                 for fp in folder_paths:
@@ -1133,17 +1192,17 @@ class Database:
         Используется для: авто-загрузки новых файлов в полностью скачанных папках.
         """
         prefix = folder_path.rstrip("/")
-        pattern = prefix + "/%" if prefix else "/%"
+        pattern = _like_children_pattern(prefix)
         with self._lock:
             rows = self._conn.execute("""
                 SELECT * FROM files
-                WHERE cloud_path LIKE ?
+                WHERE cloud_path LIKE ? ESCAPE '\\'
                   AND cloud_path != ?
                   AND type = 'file'
                   AND status != 'downloaded'
                 ORDER BY cloud_path ASC
-            """, (pattern, folder_path))
-        return [dict(r) for r in rows.fetchall()]
+            """, (pattern, folder_path)).fetchall()
+        return [dict(r) for r in rows]
 
     def remove_file(self, cloud_path: str) -> None:
         """Удалить запись о файле."""
@@ -1155,15 +1214,15 @@ class Database:
     def remove_children(self, parent_path: str) -> list[str]:
         """Удалить все файлы/папки внутри parent_path (рекурсивно).
         Возвращает список удалённых cloud_path."""
-        pattern = parent_path.rstrip("/") + "/%"
+        pattern = _like_children_pattern(parent_path.rstrip("/"))
         with self._lock:
             rows = self._conn.execute(
-                "SELECT cloud_path FROM files WHERE cloud_path LIKE ?",
+                "SELECT cloud_path FROM files WHERE cloud_path LIKE ? ESCAPE '\\'",
                 (pattern,)).fetchall()
             paths = [r["cloud_path"] for r in rows]
             if paths:
                 self._conn.execute(
-                    "DELETE FROM files WHERE cloud_path LIKE ?", (pattern,))
+                    "DELETE FROM files WHERE cloud_path LIKE ? ESCAPE '\\'", (pattern,))
                 self._conn.commit()
         self.invalidate_folder_cache(parent_path)
         return paths
@@ -1176,14 +1235,18 @@ class Database:
             raise ValueError(f"Invalid status: {status!r}")
         now = _now()
         with self._lock:
-            # SQLite limitation: max 999 vars, chunk if needed
-            for i in range(0, len(cloud_paths), 500):
-                chunk = cloud_paths[i:i + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                self._conn.execute(
-                    f"UPDATE files SET status=?, updated_at=? WHERE cloud_path IN ({placeholders})",
-                    [status, now] + chunk)
-            self._conn.commit()
+            try:
+                # SQLite limitation: max 999 vars, chunk if needed
+                for i in range(0, len(cloud_paths), 500):
+                    chunk = cloud_paths[i:i + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    self._conn.execute(
+                        f"UPDATE files SET status=?, updated_at=? WHERE cloud_path IN ({placeholders})",
+                        [status, now] + chunk)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def file_exists(self, cloud_path: str) -> bool:
         """Проверить, есть ли запись."""
@@ -1213,8 +1276,12 @@ class Database:
         return dict(row) if row else None
 
     def get_by_local_path_prefix(self, prefix: str) -> list[dict]:
-        """Найти все файлы, чей локальный путь начинается с префикса."""
-        prefix_norm = prefix.replace("\\", "/")
+        """Найти все файлы ВНУТРИ папки с данным локальным путём.
+
+        Префикс дополняется разделителем: без него "Sub" совпадал бы
+        с "Sub2" и удаляемая папка затирала статусы соседней.
+        """
+        prefix_norm = prefix.replace("\\", "/").rstrip("/") + "/"
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM files WHERE local_path IS NOT NULL"
@@ -1316,31 +1383,44 @@ class Database:
 
         Вызывается после успешного cloud-перемещения папки/файла, чтобы
         БД осталась консистентной (сохранить local_path и статусы).
+        Временные stub-записи назначения (status='syncing', size=0) удаляются.
         Возвращает количество обновлённых строк.
         """
         old = old_path.rstrip("/")
         new_p = new_path.rstrip("/")
         with self._lock:
-            # Сама папка/файл
-            self._conn.execute(
-                "UPDATE files SET cloud_path=?, name=?, updated_at=datetime('now') "
-                "WHERE cloud_path=?",
-                (new_p, os.path.basename(new_p), old),
-            )
-            fold_count = self._conn.rowcount
-            # Все дети (для папки)
-            self._conn.execute(
-                "UPDATE files SET cloud_path=? || substr(cloud_path, ?), "
-                "updated_at=datetime('now') WHERE cloud_path LIKE ?",
-                (new_p + "/", len(old) + 2, old + "/%"),
-            )
-            child_count = self._conn.rowcount
-            self._conn.commit()
+            try:
+                # Stub назначения (создаётся DnD до факта перемещения)
+                # занимает cloud_path=new_p и вызвал бы PK-конфликт
+                self._conn.execute(
+                    "DELETE FROM files WHERE cloud_path=? "
+                    "AND status='syncing' AND (size IS NULL OR size=0)",
+                    (new_p,),
+                )
+                # Сама папка/файл
+                cur = self._conn.execute(
+                    "UPDATE files SET cloud_path=?, name=?, updated_at=datetime('now') "
+                    "WHERE cloud_path=?",
+                    (new_p, os.path.basename(new_p), old),
+                )
+                fold_count = cur.rowcount
+                # Все дети (для папки)
+                cur = self._conn.execute(
+                    "UPDATE files SET cloud_path=? || substr(cloud_path, ?), "
+                    "updated_at=datetime('now') WHERE cloud_path LIKE ? ESCAPE '\\'",
+                    (new_p + "/", len(old) + 2, _escape_like(old) + "/%"),
+                )
+                child_count = cur.rowcount
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
         self.invalidate_folder_cache(old)
         self.invalidate_folder_cache(new_p)
         return fold_count + child_count
 
     def close(self):
+        self._read_conn.close()
         self._conn.close()
 
     # ── Pending operations (персистентность) ─────────────────

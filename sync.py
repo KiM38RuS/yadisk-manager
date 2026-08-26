@@ -3,6 +3,7 @@
 """
 
 import os
+import shutil
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -69,7 +70,7 @@ def move_local_file(cache_dir: str, old_cp: str, new_cp: str,
         os.makedirs(os.path.dirname(new_local), exist_ok=True)
         if os.path.exists(new_local):
             os.remove(new_local)
-        os.rename(old_local, new_local)
+        shutil.move(old_local, new_local)
         rec = database.get_file(old_cp)
         if rec:
             database.remove_file(old_cp)
@@ -319,7 +320,8 @@ def migrate_cache(old_dir: str, new_dir: str, database) -> int:
                 os.remove(dst)
 
             try:
-                os.rename(src, dst)
+                # shutil.move работает и между дисками (os.rename — нет)
+                shutil.move(src, dst)
                 count += 1
                 # Обновить local_path в БД
                 cloud_path = "/" + rel.replace("\\", "/")

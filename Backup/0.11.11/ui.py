@@ -334,7 +334,7 @@ class MainWindow(QMainWindow):
         """
         auth = AuthDialog(self)
         auth.setWindowModality(Qt.WindowModal)
-        if auth.exec() != QDialog.Accepted:
+        if auth.exec() != AuthDialog.Accepted:
             return False
 
         new_token = auth.token
@@ -394,6 +394,10 @@ class MainWindow(QMainWindow):
             logger.error("Tree load failed: %s", error)
             if self._is_auth_error(error):
                 self._handle_auth_error()
+                # Снимаем оверлеи — иначе висят до перезапуска
+                self._hide_loading()
+                self._hide_tree_loading()
+                self._hide_table_loading()
                 return
             self.statusBar().showMessage(f"Ошибка загрузки папок: {error}")
         else:
@@ -439,6 +443,10 @@ class MainWindow(QMainWindow):
             logger.error("Folder load failed for %s: %s", path, error)
             if self._is_auth_error(error):
                 self._handle_auth_error()
+                # Снимаем оверлеи — иначе висят до перезапуска
+                self._hide_loading()
+                self._hide_left_busy()
+                self._hide_table_loading()
                 return
             self._hide_left_busy()
             self.statusBar().showMessage(f"❌ {error}")
@@ -1753,14 +1761,18 @@ class MainWindow(QMainWindow):
         image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
         
         # Делаем изображение полупрозрачным (альфа-канал ~50%)
+        # pixel() в ARGB32 возвращает 0xAARRGGBB: альфа — старший байт
         for y in range(image.height()):
             for x in range(image.width()):
                 pixel = image.pixel(x, y)
-                a = qRgba(pixel >> 24 & 0xFF, pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF)
-                alpha = (pixel & 0xFF)  # текущий альфа-канал
-                new_alpha = int(alpha * 0.5)  # уменьшаем до 50%
-                image.setPixel(x, y, qRgba(pixel >> 24 & 0xFF, pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, new_alpha))
-        
+                alpha = (pixel >> 24) & 0xFF
+                new_alpha = int(alpha * 0.5)
+                image.setPixel(x, y, qRgba(
+                    (pixel >> 16) & 0xFF,
+                    (pixel >> 8) & 0xFF,
+                    pixel & 0xFF,
+                    new_alpha))
+
         return QIcon(QPixmap.fromImage(image))
 
     def _update_app_icons(self, update_tray_only: bool = False):
@@ -1783,18 +1795,29 @@ class MainWindow(QMainWindow):
 
     def _check_connectivity(self):
         """Проверка интернет-соединения через запрос к yandex.ru.
-        При изменении статуса обновляет иконку в трее."""
+
+        Сам сокет-проба — в daemon-потоке (создание соединения может висеть
+        до 5 секунд, на GUI-потоке это замораживало бы интерфейс).
+        Результат забирается через _download_results в главном потоке.
+        """
         import socket
-        
+
+        def _probe():
+            is_error = False
+            try:
+                sock = socket.create_connection(("yandex.ru", 443), timeout=5)
+                sock.close()
+            except Exception:
+                is_error = True
+            self._download_results.put(("", "", "", "connectivity", is_error))
+
+        threading.Thread(target=_probe, daemon=True,
+                         name="connectivity-probe").start()
+
+    def _on_connectivity_result(self, is_error: bool):
+        """Результат пробы подключения (главный поток)."""
         old_online = self._online
-        try:
-            # Пробуем подключиться к yandex.ru:443 (HTTPS)
-            sock = socket.create_connection(("yandex.ru", 443), timeout=5)
-            sock.close()
-            self._online = True
-        except (socket.timeout, socket.gaierror, OSError, Exception):
-            self._online = False
-        
+        self._online = not is_error
         # Если статус изменился — обновляем иконку
         if old_online != self._online:
             logger.info(f"Статус подключения изменился: {'онлайн' if self._online else 'офлайн'}")
@@ -1901,6 +1924,7 @@ class MainWindow(QMainWindow):
         """Авто-проверка обновлений: отложенный старт + периодический таймер."""
         self._update_thread = None
         self._update_dialog = None
+        self._update_download = None  # бесшумное скачивание обновления
         self._pending_update = None   # найденное обновление (UpdateInfo)
         self._update_offered = False  # в этой сессии уже предлагали
         self._pending_update_path = None  # скачанный exe для бесшумного обновления
@@ -1918,13 +1942,14 @@ class MainWindow(QMainWindow):
         """
         if not db.get_check_updates_enabled() and not db.get_auto_update_enabled():
             return
-        if self._update_thread is not None or self._update_dialog is not None:
-            return  # уже идёт проверка/диалог
+        if self._update_thread is not None or self._update_dialog is not None \
+                or self._update_download is not None:
+            return  # уже идёт проверка/диалог/скачивание
         self._start_update_check(auto=True)
 
     def _check_updates_manual(self):
         """Ручная проверка из меню трея: диалог при наличии обновления."""
-        if self._update_thread is not None:
+        if self._update_thread is not None or self._update_download is not None:
             return
         self._start_update_check(auto=False)
 
@@ -1986,6 +2011,8 @@ class MainWindow(QMainWindow):
         (_maybe_apply_pending_update), чтобы не прерывать работу.
         """
         logger.info("Auto-update: downloading %s in background", info.version)
+        if self._update_download is not None:
+            return  # скачивание уже идёт — второй поток писал бы в тот же файл
         try:
             self._tray.showMessage(
                 "Обновление",
@@ -2032,6 +2059,8 @@ class MainWindow(QMainWindow):
     def _show_update_dialog(self):
         if self._update_dialog is not None:
             return
+        if self._update_download is not None:
+            return  # бесшумное скачивание уже идёт — избегаем второго
         self._tray_show()
         dlg = UpdateDialog(self._pending_update, parent=self)
         self._update_dialog = dlg
@@ -2320,13 +2349,17 @@ class MainWindow(QMainWindow):
             return
 
         # Немедленно показываем "syncing" для каждого назначения
+        self._internal_drop_stubs: list[str] = []
         for src, new_path in items:
             name = os.path.basename(src.rstrip("/"))
-            # Создаём заглушку в БД со статусом syncing
+            # Создаём заглушку в БД со статусом syncing (тип — как у источника)
+            src_rec = self._db.get_file(src)
+            type_ = src_rec["type"] if src_rec else "file"
             self._db.upsert_file(
-                new_path, name, "file",
+                new_path, name, type_,
                 size=0, modified="", md5="")
             self._db.set_status(new_path, "syncing")
+            self._internal_drop_stubs.append(new_path)
         self.table_model.refresh_statuses()
         self.tree_model.emit_path_changed(dest)
         self._show_left_busy(f"📦 {action_name} {len(items)} элемент(ов)...")
@@ -2366,6 +2399,13 @@ class MainWindow(QMainWindow):
                 logger.warning("DnD: complete_pending_op failed: %s", e)
             self._internal_drop_op_id = None
 
+        # Убираем заглушки неудавшихся элементов (иначе зависают в syncing)
+        for _src, new_p in result.get("failed", []):
+            try:
+                self._db.remove_file(new_p)
+            except Exception as e:
+                logger.warning("DnD: remove stub %s failed: %s", new_p, e)
+
         # Мигрируем БД для перемещённых элементов
         for src_p, new_p in processed:
             if is_move:
@@ -2373,6 +2413,12 @@ class MainWindow(QMainWindow):
                     self._db.migrate_path(src_p, new_p)
                 except Exception as e:
                     logger.warning("DnD: migrate_path %s → %s failed: %s", src_p, new_p, e)
+            else:
+                # Копия существует в облаке, но не скачана — снимаем заглушку
+                try:
+                    self._db.set_cloud_only(new_p)
+                except Exception as e:
+                    logger.warning("DnD: set_cloud_only %s failed: %s", new_p, e)
 
         if errors:
             self._hide_left_busy()
@@ -2537,8 +2583,10 @@ class MainWindow(QMainWindow):
         """
         if not self._watcher_queue:
             return
-        batch = list(self._watcher_queue)
-        self._watcher_queue.clear()
+        # Swap-replace: события, добавленные watchdog-потоком ПОСЛЕ list()
+        # и ДО clear(), терялись бы при clear() — атомарно забираем всё.
+        batch = self._watcher_queue
+        self._watcher_queue = []
 
         # Группируем deleted/created по basename для поиска пар
         by_name: dict[str, list] = {}
@@ -3062,6 +3110,25 @@ class MainWindow(QMainWindow):
             return
         for cloud_path, local_path, md5, action, is_error in batch:
             try:
+                if action == "connectivity":
+                    self._on_connectivity_result(is_error)
+                    continue
+
+                if action == "zip":
+                    # Результат zip-скачивания: md5-слот несёт текст ошибки
+                    self._hide_progress()
+                    if is_error:
+                        logger.warning("ZIP download failed: %s — %s", cloud_path, md5)
+                        QMessageBox.critical(
+                            self, "Ошибка",
+                            f"Не удалось скачать архив:\n{md5}")
+                    else:
+                        logger.info("ZIP saved: %s", local_path)
+                        QMessageBox.information(
+                            self, "Готово",
+                            f"Архив сохранён:\n{local_path}")
+                    continue
+
                 if is_error:
                     self._syncing.discard(cloud_path)
                     self._db.set_cloud_only(cloud_path)  # сброс статуса в БД
@@ -3072,6 +3139,9 @@ class MainWindow(QMainWindow):
                     if action == "upload":
                         self._active_uploads = max(0, self._active_uploads - 1)
                         self._process_upload_queue()
+                    elif action == "download":
+                        self._active_downloads = max(0, self._active_downloads - 1)
+                        self._process_download_queue()
                     continue
 
                 if action == "download":
@@ -4690,17 +4760,11 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda d=done, t=total: _ui_progress(d, t))
 
         def on_finished(lp):
-            self._hide_progress()
-            QMessageBox.information(
-                self, "Готово",
-                f"Архив сохранён:\n{lp}")
-            logger.info("ZIP saved: %s", lp)
+            self._download_results.put((cloud_path, lp, "", "zip", False))
 
         def on_error(msg):
-            self._hide_progress()
-            QMessageBox.critical(
-                self, "Ошибка",
-                f"Не удалось скачать архив:\n{msg}")
+            # md5-слот используем как носитель текста ошибки для zip-действия
+            self._download_results.put((cloud_path, "", msg, "zip", True))
 
         worker.progress.connect(on_progress, Qt.DirectConnection)
         worker.finished.connect(on_finished, Qt.DirectConnection)
@@ -4715,8 +4779,8 @@ class MainWindow(QMainWindow):
         """Обновить подсвеченную строку в таблице (через делегат RowHoverDelegate)."""
         delegate = self._hover_delegate
         old_row = delegate.hovered_row
-        src_idx = self.table_sort_model.mapToSource(index)
-        new_row = src_idx.row()
+        # Делегат рисует в координатах view (proxy), mapToSource здесь неверен
+        new_row = index.row()
         if old_row != new_row:
             delegate.hovered_row = new_row
             # Перерисовать старую и новую строку
@@ -4846,6 +4910,7 @@ class MainWindow(QMainWindow):
 
         # Запоминаем старую запись БД до изменений
         old_rec = self._db.get_file(cloud_path)
+        op_id = None
 
         try:
             # 1. Переименовываем в облаке
@@ -4856,6 +4921,7 @@ class MainWindow(QMainWindow):
             # 2. Переименовываем локальный файл, если он был скачан
             old_local = old_rec.get("local_path") if old_rec else None
             local_renamed = False
+            new_local = None
             if old_local and os.path.exists(old_local):
                 new_local = os.path.join(
                     os.path.dirname(old_local), new_name)
@@ -4865,36 +4931,33 @@ class MainWindow(QMainWindow):
                         os.remove(new_local)
                     os.rename(old_local, new_local)
 
-                    self._db.complete_pending_op(op_id, "done")
                     logger.info("Local renamed: %s → %s",
                                 old_local, new_local)
                     local_renamed = True
                 except Exception as e:
                     logger.error("Local rename failed: %s", e)
 
-            # 3. Удаляем старую запись из БД
-            self._db.remove_file(cloud_path)
+            # 3-4. Мигрируем записи в БД (сам элемент + дети папки):
+            # сохраняет статусы, local_path и last_sync_md5
+            self._db.migrate_path(cloud_path, new_path)
 
-            # 4. Создаём новую запись
-            self._db.upsert_file(
-                new_path, new_name, item_type,
-                size=meta.get("size", 0),
-                modified=meta.get("modified", ""),
-                md5=meta.get("md5", ""),
-            )
+            # 5. Обновляем локальный путь переименованного файла
+            if local_renamed and old_rec:
+                self._db.set_downloaded(
+                    new_path, new_local,
+                    last_sync_md5=old_rec.get("last_sync_md5", ""),
+                )
 
-            # 5. Восстанавливаем статус, если файл был локальным
-            if old_rec and old_rec.get("status") == "downloaded":
-                if local_renamed:
-                    self._db.set_downloaded(
-                        new_path, new_local,
-                        last_sync_md5=old_rec.get("last_sync_md5", ""),
-                    )
-
+            self._db.complete_pending_op(op_id, "done")
             self.statusBar().showMessage(
                 f"✅ Переименовано: {old_name} → {new_name}", 3000)
             self._navigate_to_folder(self._current_path)
         except Exception as e:
+            if op_id is not None:
+                try:
+                    self._db.complete_pending_op(op_id, "failed")
+                except Exception:
+                    logger.warning("Rename: complete_pending_op failed")
             QMessageBox.critical(self, "Ошибка переименования",
                                  f"Не удалось переименовать «{old_name}»:\n{e}")
 
@@ -5418,7 +5481,12 @@ class MainWindow(QMainWindow):
         self._watcher_timer.stop()
         self._poll_timer.stop()
         self._heartbeat_timer.stop()
-        self._watcher.stop()
+        self._bulk_sync_timer.stop()
+        self._connectivity_timer.stop()
+        self._update_timer.stop()
+        watcher = getattr(self, "_watcher", None)
+        if watcher is not None:
+            watcher.stop()
         QApplication.processEvents()
         # Затем ждём завершения потоков
         for t in self._active_threads:
