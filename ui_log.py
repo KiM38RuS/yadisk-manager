@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 import db
+import l10n
 from ui_shared import _svg_icon
 
 
@@ -31,10 +32,9 @@ class LogHandler(logging.Handler):
     def __init__(self, signal: LogSignal):
         super().__init__(level=logging.NOTSET)
         self._signal = signal
-        self.setFormatter(logging.Formatter(
-            "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%H:%M:%S",
-        ))
+        # Переводящий форматтер: сообщения лога будут на языке пользователя
+        # (по умолчанию 'ru', см. l10n.py / db.get_log_language()).
+        self.setFormatter(l10n.make_formatter())
 
     def emit(self, record):
         try:
@@ -232,6 +232,7 @@ class LogWindow(QWidget):
             if any(kw in text for kw in (
                 "Uploaded", "Downloaded", "✅", "успешно",
                 "загружено", "скачан", "создан",
+                "Загружено", "Скачано",
             )):
                 return "#44cc44"
             return "#cccccc"

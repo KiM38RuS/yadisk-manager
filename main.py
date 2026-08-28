@@ -25,11 +25,16 @@ from PySide6.QtWidgets import (
 
 import sync  # noqa: E402  (sync логика)
 
+import l10n  # noqa: E402  (локализация лога)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+# ── Локализация лога: форматтер переводит шаблоны сообщений на язык пользователя ──
+for _h in logging.getLogger().handlers:
+    _h.setFormatter(l10n.make_formatter())
 # ── Файловый лог — критично для exe без консоли ───────────
 # Ротация: 1 МБ × 3 бэкапа → максимум ~4 МБ, не растёт бесконечно
 try:
@@ -43,9 +48,7 @@ try:
         backupCount=3,        # yadisk.log + .1/.2/.3
         encoding="utf-8",
     )
-    _fh.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%H:%M:%S")
-    )
+    _fh.setFormatter(l10n.make_formatter())
     logging.getLogger().addHandler(_fh)
 except Exception:
     pass  # файловый лог — бонус, не блокируем запуск
@@ -133,6 +136,8 @@ def main():
     import db
     import ui
     from _version import VERSION
+    # Установить язык лога из конфига (по умолчанию 'ru')
+    l10n.set_language(db.get_log_language())
     token = db.get_token()
     if not token:
         auth = ui.AuthDialog()

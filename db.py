@@ -190,6 +190,23 @@ def set_theme(theme: str) -> None:
     update_config("theme", theme)
 
 
+# ── Язык лога ──────────────────────────────────────────────
+
+
+def get_log_language() -> str:
+    """Язык лога (ISO 639-1): 'ru' (по умолчанию) или 'en'.
+
+    Управляет переводом сообщений лога (см. l10n.py).
+    """
+    return load_config().get("log_lang", "ru")
+
+
+def set_log_language(lang: str) -> None:
+    """Установить язык лога ('ru' / 'en')."""
+    update_config("log_lang", lang)
+
+
+
 # ── Window geometry ────────────────────────────────────────
 
 
