@@ -1,0 +1,340 @@
+"""
+Авто-обход сетевых блокировок (DNS-over-HTTPS + кэш IP).
+
+Чистая логика без Qt. HealedAdapter монтируется на сессию
+disk_api.YaDiskAPI и вызывается из воркер-потоков.
+
+Схема:
+  1. Системный DNS пробуется всегда первым (пока он работает — обход невидим).
+  2. При ошибке резолвинга/TCP — классификация (classify_error).
+  3. Если пользователь включил обход — IP берутся из IpCache или DoHResolver.
+  4. Соединение открывается на IP, TLS SNI и проверка сертификата —
+     по исходному имени хоста.
+  5. Если помочь не удалось — наружу уходит NetBlockError, а факт
+     блокировки пишется в очередь событий для UI (drain_block_events).
+"""
+
+import collections
+import enum
+import ipaddress
+import logging
+import socket
+import threading
+import time
+from typing import Callable, Iterator, NoReturn, Optional
+from urllib.parse import quote
+
+import requests
+import urllib3.exceptions
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.poolmanager import PoolManager
+
+logger = logging.getLogger("net_heal")
+
+DOH_TIMEOUT_S = 5.0
+DOH_ENDPOINTS = (
+    "https://1.1.1.1/dns-query",
+    "https://8.8.8.8/resolve",
+)
+TTL_MIN_S = 60
+TTL_MAX_S = 3600
+
+
+class NetIssue(enum.Enum):
+    DnsBlocked = "dns"
+    TcpBlocked = "tcp"
+
+
+class NetBlockError(Exception):
+    """Исчерпаны все способы достучаться до хоста (блокировка сети)."""
+
+    def __init__(self, kind: NetIssue, host: str):
+        super().__init__(f"{kind.value}-blocked: {host}")
+        self.kind = kind
+        self.host = host
+
+
+_DNS_MARKERS = (
+    "getaddrinfo failed",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname provided",
+)
+
+
+def _iter_exception_chain(exc: BaseException) -> Iterator[BaseException]:
+    """exc + вложенные исключения (args, __cause__, __context__) без циклов.
+
+    requests оборачивает ошибки urllib3 первым аргументом (не через
+    __cause__), поэтому обходим и args.
+    """
+    seen: set[int] = set()
+    stack = [exc]
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        yield cur
+        for arg in cur.args:
+            if isinstance(arg, BaseException):
+                stack.append(arg)
+        for attr in ("__cause__", "__context__"):
+            nxt = getattr(cur, attr, None)
+            if isinstance(nxt, BaseException):
+                stack.append(nxt)
+
+
+def classify_error(exc: BaseException) -> Optional[NetIssue]:
+    """Классифицировать сетевое исключение requests/urllib3.
+
+    DnsBlocked — имя не резолвится (NameResolutionError / gaierror);
+    TcpBlocked — TCP reset / protocol error / таймаут соединения;
+    None — прочее (HTTP-коды, SSL, таймаут чтения — обычные ошибки).
+    """
+    for cur in _iter_exception_chain(exc):
+        if isinstance(cur, (urllib3.exceptions.NameResolutionError,
+                            socket.gaierror)):
+            return NetIssue.DnsBlocked
+        if isinstance(cur, (ConnectionResetError,
+                            urllib3.exceptions.ProtocolError)):
+            return NetIssue.TcpBlocked
+        if isinstance(cur, requests.exceptions.ConnectTimeout):
+            return NetIssue.TcpBlocked
+        msg = str(cur).lower()
+        if any(marker in msg for marker in _DNS_MARKERS):
+            return NetIssue.DnsBlocked
+    return None
+
+
+# ── события блокировок для UI ────────────────────────────
+
+_events_lock = threading.Lock()
+_events: collections.deque = collections.deque(maxlen=50)
+
+
+def record_block_event(kind: NetIssue, host: str) -> None:
+    """Записать факт блокировки (потокобезопасно, из воркер-потоков)."""
+    with _events_lock:
+        _events.append((time.monotonic(), kind, host))
+
+
+def drain_block_events() -> list[tuple[float, NetIssue, str]]:
+    """Забрать накопившиеся события (вызывается из GUI-потока)."""
+    with _events_lock:
+        out = list(_events)
+        _events.clear()
+    return out
+
+
+# ── кэш IP ───────────────────────────────────────────────
+
+
+class IpCache:
+    """Потокобезопасный кэш «хост → список рабочих IP» с TTL.
+
+    Отрицательное кэширование: IP, на котором соединение упало, удаляется
+    до конца TTL (mark_bad) — следующий запрос возьмёт другой IP или
+    перерезолвит через DoH (ротация CDN-адресов Яндекса).
+    """
+
+    def __init__(self, time_fn: Callable[[], float] = time.monotonic):
+        self._time_fn = time_fn
+        self._lock = threading.Lock()
+        self._data: dict[str, tuple[list[str], float]] = {}
+
+    def get(self, host: str) -> list[str]:
+        """Свежие IP хоста (копия списка) или []."""
+        with self._lock:
+            entry = self._data.get(host)
+            if entry is None:
+                return []
+            ips, expires_at = entry
+            if self._time_fn() >= expires_at:
+                del self._data[host]
+                return []
+            return list(ips)
+
+    def put(self, host: str, ips: list[str], ttl_s: int) -> None:
+        ttl = max(TTL_MIN_S, min(int(ttl_s), TTL_MAX_S))
+        with self._lock:
+            self._data[host] = (list(ips), self._time_fn() + ttl)
+
+    def mark_bad(self, host: str, ip: str) -> None:
+        """Пометить IP нерабочим до конца TTL."""
+        with self._lock:
+            entry = self._data.get(host)
+            if entry is None:
+                return
+            ips, expires_at = entry
+            remaining = [x for x in ips if x != ip]
+            if remaining:
+                self._data[host] = (remaining, expires_at)
+            else:
+                del self._data[host]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+
+# ── DNS-over-HTTPS ───────────────────────────────────────
+
+
+def _is_ipv4(value: str) -> bool:
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except ValueError:
+        return False
+
+
+class DoHResolver:
+    """DNS-over-HTTPS JSON (диалект Cloudflare/Google, RFC 8484-совместимый).
+
+    Эндпоинты заданы голыми IP — их сертификаты валидны без DNS.
+    Собственная чистая сессия requests БЕЗ HealedAdapter (иначе рекурсия).
+    """
+
+    def __init__(self, timeout_s: float = DOH_TIMEOUT_S, session=None):
+        self._timeout_s = timeout_s
+        self._session = session if session is not None else requests.Session()
+
+    def resolve(self, host: str) -> tuple[list[str], int]:
+        """A-записи хоста и TTL (зажатый в [TTL_MIN_S..TTL_MAX_S]).
+
+        Raises NetBlockError, если ни один эндпоинт не ответил.
+        """
+        last_exc: Optional[Exception] = None
+        for base in DOH_ENDPOINTS:
+            url = f"{base}?name={quote(host, safe='')}&type=A"
+            try:
+                resp = self._session.get(
+                    url, timeout=self._timeout_s,
+                    headers={"accept": "application/dns-json"})
+                resp.raise_for_status()
+                data = resp.json()
+                answers = [a for a in data.get("Answer", [])
+                           if a.get("type") == 1
+                           and _is_ipv4(str(a.get("data", "")))]
+                if not answers:
+                    # NXDOMAIN / нет A-записей — валидный пустой ответ
+                    return [], TTL_MIN_S
+                raw_ttl = min(int(a.get("TTL", TTL_MAX_S)) for a in answers)
+                ttl = max(TTL_MIN_S, min(raw_ttl, TTL_MAX_S))
+            except (requests.RequestException, ValueError,
+                    AttributeError, TypeError) as e:
+                logger.warning("DoH %s failed: %s", base, e)
+                last_exc = e
+                continue
+            ips = [str(a["data"]) for a in answers]
+            logger.info("DoH %s: %s -> %s (ttl=%ss)", base, host, ips, ttl)
+            return ips, ttl
+        raise NetBlockError(NetIssue.DnsBlocked, host) from last_exc
+
+
+# ── адаптер с обходом ────────────────────────────────────
+
+
+class HealState:
+    """Общее состояние обхода: его публикует HealedAdapter,
+    читают соединения пула (из любых воркер-потоков)."""
+
+    def __init__(self):
+        self.cache = IpCache()
+        self.resolver = DoHResolver()
+        self.enabled_fn: Callable[[], bool] = lambda: False
+
+
+STATE = HealState()
+
+
+class HealedHTTPSConnection(HTTPSConnection):
+    """HTTPSConnection с фолбэком резолвинга через IpCache/DoH.
+
+    Системный DNS всегда первый. При его отказе (и включённом обходе)
+    сокет открывается на IP: временно подменяем _dns_host (по нему
+    urllib3 делает create_connection), в finally возвращаем исходное —
+    тогда SNI и проверка сертификата остаются на имени хоста (self.host).
+    """
+
+    def _new_conn(self):
+        if self.proxy is not None:
+            # Прокси-трафик не хилим: сокет идёт на прокси, не на origin.
+            return super()._new_conn()
+        host = self.host
+        try:
+            return super()._new_conn()
+        except Exception as exc:
+            kind = classify_error(exc)
+            if kind is None:
+                raise
+            first_exc = exc  # имя `exc` удалится в конце except-блока
+        logger.info("System path to %s failed (%s), heal=%s",
+                    host, kind.value, STATE.enabled_fn())
+        if not STATE.enabled_fn():
+            self._give_up(kind, host, cause=first_exc)
+        ips = STATE.cache.get(host)
+        if not ips:
+            try:
+                ips, ttl = STATE.resolver.resolve(host)
+            except NetBlockError as doh_err:
+                self._give_up(kind, host, cause=doh_err)
+            STATE.cache.put(host, ips, ttl)
+        last_exc = first_exc
+        for ip in ips:
+            self._dns_host = ip
+            try:
+                return super()._new_conn()
+            except (OSError, urllib3.exceptions.HTTPError) as conn_err:
+                logger.info("IP %s unreachable for %s (%s)", ip, host, conn_err)
+                last_exc = conn_err
+                STATE.cache.mark_bad(host, ip)
+            finally:
+                self._dns_host = host
+        self._give_up(kind, host, cause=last_exc)
+
+    @staticmethod
+    def _give_up(kind: NetIssue, host: str,
+                 cause: BaseException) -> NoReturn:
+        """Записать событие для UI и бросить типизированную ошибку."""
+        record_block_event(kind, host)
+        raise NetBlockError(kind, host) from cause
+
+
+class _HealedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = HealedHTTPSConnection
+
+
+class _HealedPoolManager(PoolManager):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # urllib3 2.x затирает pool_classes_by_scheme из модульной константы
+        # (poolmanager.py:227), класс-атрибут не работает — задаём на инстансе.
+        self.pool_classes_by_scheme = {
+            "http": HTTPConnectionPool,
+            "https": _HealedHTTPSConnectionPool,
+        }
+
+
+class HealedAdapter(HTTPAdapter):
+    """HTTPAdapter с обходом DNS/TCP-блокировок.
+
+    Монтируется на https:// вместо стандартного адаптера. Настройки
+    обхода публикует в net_heal.STATE — их читают соединения пула.
+    enabled_fn вызывается при каждом сбое, поэтому ручное переключение
+    чекбокса в настройках действует сразу, без пересоздания сессии.
+    """
+
+    def __init__(self, *args, enabled_fn=None, cache=None, resolver=None,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        STATE.enabled_fn = enabled_fn or (lambda: False)
+        STATE.cache = cache or IpCache()
+        STATE.resolver = resolver or DoHResolver()
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs.setdefault("block", False)
+        self.poolmanager = _HealedPoolManager(*args, **kwargs)

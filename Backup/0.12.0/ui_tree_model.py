@@ -1,0 +1,401 @@
+"""
+FolderTreeItem, FolderTreeModel — модель дерева папок для YaDisk Manager.
+"""
+
+import logging
+import os
+
+from PySide6.QtCore import Qt, QAbstractItemModel, QModelIndex
+from PySide6.QtGui import QIcon
+
+import db
+from ui_shared import _svg_icon, _rotated_svg_icon, STATUS_ICON, is_animated_status, get_rotation_angle, get_current_frame
+
+logger = logging.getLogger("ui.tree_model")
+
+# Иконка приложения для корневого узла «Яндекс Диск» (кэшируется — QIcon
+# из .ico создаётся один раз, а не на каждый data() вызов)
+_APP_ICON = None
+
+
+def _app_icon() -> QIcon:
+    global _APP_ICON
+    if _APP_ICON is None:
+        path = os.path.join(os.path.dirname(__file__), "icon-main.ico")
+        _APP_ICON = QIcon(path) if os.path.isfile(path) else QIcon()
+    return _APP_ICON
+
+
+class FolderTreeItem:
+    def __init__(self, name: str, cloud_path: str, parent=None, status: str = None):
+        self.name = name
+        self.cloud_path = cloud_path
+        self.parent = parent
+        self.children: list["FolderTreeItem"] = []
+        self.loaded = False
+        self._has_children = True  # assume has children until proven otherwise
+        self.db_loaded = False    # дети получены из SQLite (мгновенно)
+        self.arrow_known = False  # наличие подпапок известно из БД (точная стрелка)
+        self.status = status  # cached folder aggregate status
+
+    def child(self, row: int):
+        return self.children[row] if 0 <= row < len(self.children) else None
+
+    def row(self):
+        if self.parent:
+            return self.parent.children.index(self)
+        return 0
+
+
+class FolderTreeModel(QAbstractItemModel):
+    """Модель дерева папок — НИКОГДА не делает API-вызовов синхронно.
+
+    hasChildren() возвращает True для не загруженных узлов (показывает стрелку),
+    и _has_children для загруженных — так стрелка скрыта у пустых папок.
+    """
+
+    def __init__(self, api, database: db.Database = None, parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._db = database
+        self._root = FolderTreeItem("root", "")
+        self._root.loaded = False
+        self._create_visible_root()
+
+    def _create_visible_root(self):
+        """Создать видимый корневой узел «Яндекс Диск» (cloud_path = "/").
+
+        Это единственный верхнеуровневый элемент дерева; все папки диска
+        становятся его детьми. Клик по нему → навигация на корень диска.
+        """
+        self._visible_root = FolderTreeItem("Яндекс Диск", "/", parent=self._root)
+        self._root.children.append(self._visible_root)
+
+    # ── async population ────────────────────────────────
+
+    def populate_children(self, cloud_path: str, items: list[dict]) -> None:
+        """Асинхронно добавить children узлу (из главного потока)."""
+        parent_item = self._find_item(cloud_path)
+        if not parent_item or parent_item.loaded:
+            return
+        # Узел уже наполнен из БД → API-результат мержим, а не дублируем
+        if parent_item.db_loaded:
+            self.merge_children_from_api(cloud_path, items)
+            return
+        parent_item.loaded = True
+        folders = [it for it in items if it.get("type") == "dir"]
+        parent_item._has_children = len(folders) > 0
+        logger.info("Tree: %s → %d папок", cloud_path, len(folders))
+        if not folders:
+            return
+        parent_index = self._index_of(parent_item)
+        self.beginInsertRows(parent_index, 0, len(folders) - 1)
+        # Предзагружаем aggregate status для всех папок разом
+        # (в data() это вызывало бы 20+ SQL-запросов во время Qt paint)
+        if self._db is not None and folders:
+            folder_paths = [f["path"] for f in folders]
+            batch_statuses = self._db.get_folder_batch_aggregate_status(cloud_path, folder_paths)
+            for f in folders:
+                f["_status"] = batch_statuses.get(f["path"], "cloud_only")
+        for f in folders:
+            child = FolderTreeItem(
+                name=f["name"],
+                cloud_path=f["path"],
+                parent=parent_item,
+            )
+            child.status = f.get("_status")
+            parent_item.children.append(child)
+        self.endInsertRows()
+
+    def populate_children_from_db(self, cloud_path: str, folders: list[dict],
+                                  with_subdirs: set[str]) -> None:
+        """Мгновенно вставить детей из SQLite (вызов только из главного потока).
+
+        Узел получает db_loaded=True: дети и стрелки видны сразу, без API.
+        API-сверка досинхронизируется позже через merge_children_from_api().
+        Повторный вызов — no-op.
+        """
+        parent_item = self._find_item(cloud_path)
+        if not parent_item or parent_item.loaded or parent_item.db_loaded:
+            return
+        parent_item.db_loaded = True
+        parent_item._has_children = len(folders) > 0
+        if not folders:
+            return
+        parent_index = self._index_of(parent_item)
+        self.beginInsertRows(parent_index, 0, len(folders) - 1)
+        if self._db is not None:
+            folder_paths = [f["path"] for f in folders]
+            batch_statuses = self._db.get_folder_batch_aggregate_status(
+                cloud_path, folder_paths)
+        else:
+            batch_statuses = {}
+        for f in folders:
+            child = FolderTreeItem(
+                name=f["name"], cloud_path=f["path"], parent=parent_item)
+            child.status = batch_statuses.get(f["path"], "cloud_only")
+            # Точная стрелка из БД: знаем, есть ли у ребёнка свои подпапки
+            child._has_children = f["path"] in with_subdirs
+            child.arrow_known = True
+            parent_item.children.append(child)
+        self.endInsertRows()
+
+    def merge_children_from_api(self, cloud_path: str, items: list[dict]) -> None:
+        """Досинхронизировать db_loaded-узел списком из API (главный поток).
+
+        Добавляет новые папки, удаляет исчезнувшие, ставит loaded=True.
+        Для узлов без db_loaded — no-op (их обслуживает populate_children).
+        """
+        parent_item = self._find_item(cloud_path)
+        if not parent_item or not parent_item.db_loaded or parent_item.loaded:
+            return
+        folders = [it for it in items if it.get("type") == "dir"]
+        parent_item.loaded = True
+        parent_item._has_children = len(folders) > 0
+        api_by_path = {f["path"]: f for f in folders}
+        # Удаления — с конца, чтобы row-индексы не плыли
+        for row in range(len(parent_item.children) - 1, -1, -1):
+            child = parent_item.children[row]
+            if child.cloud_path not in api_by_path:
+                self.beginRemoveRows(self._index_of(parent_item), row, row)
+                parent_item.children.pop(row)
+                self.endRemoveRows()
+        # Вставки новых
+        existing = {c.cloud_path for c in parent_item.children}
+        new_items = [f for p, f in api_by_path.items() if p not in existing]
+        if new_items:
+            base = len(parent_item.children)
+            self.beginInsertRows(self._index_of(parent_item),
+                                 base, base + len(new_items) - 1)
+            for f in new_items:
+                parent_item.children.append(FolderTreeItem(
+                    name=f["name"], cloud_path=f["path"], parent=parent_item))
+            self.endInsertRows()
+        # Статусы одним batch-запросом
+        if self._db is not None and parent_item.children:
+            paths = [c.cloud_path for c in parent_item.children]
+            batch = self._db.get_folder_batch_aggregate_status(cloud_path, paths)
+            for c in parent_item.children:
+                c.status = batch.get(c.cloud_path, "cloud_only")
+
+    def _find_item(self, cloud_path: str) -> FolderTreeItem | None:
+        """Поиск узла по cloud_path (рекурсивно)."""
+        if cloud_path == "/":
+            return self._visible_root
+        if cloud_path == "":
+            return self._root
+        return self._search_item(self._root, cloud_path)
+
+    def _search_item(self, item: FolderTreeItem, cloud_path: str) -> FolderTreeItem | None:
+        for child in item.children:
+            if child.cloud_path == cloud_path:
+                return child
+            found = self._search_item(child, cloud_path)
+            if found:
+                return found
+        return None
+
+    def _index_of(self, item: FolderTreeItem) -> QModelIndex:
+        if item is self._root or item.parent is None:
+            return QModelIndex()
+        return self.createIndex(item.row(), 0, item)
+
+    # ── QAbstractItemModel interface (синхронные, без API) ─
+
+    def index(self, row: int, column: int,
+              parent: QModelIndex = QModelIndex()) -> QModelIndex:
+        if not self.hasIndex(row, column, parent):
+            return QModelIndex()
+        parent_item = parent.internalPointer() if parent.isValid() else self._root
+        child = parent_item.child(row)
+        return self.createIndex(row, column, child) if child else QModelIndex()
+
+    def parent(self, index: QModelIndex) -> QModelIndex:
+        if not index.isValid():
+            return QModelIndex()
+        item: FolderTreeItem = index.internalPointer()
+        if item.parent is None or item.parent is self._root:
+            return QModelIndex()
+        return self.createIndex(item.parent.row(), 0, item.parent)
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        if parent.isValid():
+            item: FolderTreeItem = parent.internalPointer()
+            return len(item.children)
+        return len(self._root.children)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 1
+
+    def hasChildren(self, parent: QModelIndex = QModelIndex()) -> bool:
+        """True если у узла должны быть дети (рисуется стрелка раскрытия).
+
+        Приоритет источников: API-сверка > знание из БД > оптимистичное True.
+        """
+        if not parent.isValid():
+            return True
+        item: FolderTreeItem = parent.internalPointer()
+        if item.loaded:
+            return item._has_children
+        if item.db_loaded:
+            return len(item.children) > 0
+        if item.arrow_known:
+            return item._has_children
+        return True  # ничего не знаем → показываем стрелку
+
+    def _prefetch_sibling_statuses(self, item: FolderTreeItem):
+        """Batch-запрос статусов для всех незагруженных братьев item за один SQL.
+
+        Вызывается из data() при status is None — вместо N индивидуальных
+        LIKE-запросов (каждый ~100мс) делает один UNION ALL запрос
+        через get_folder_batch_aggregate_status.
+        """
+        parent = item.parent
+        if parent is None or parent is self._root or self._db is None:
+            return
+        unloaded = [c for c in parent.children
+                    if c.status is None and c is not self._visible_root]
+        if not unloaded:
+            return
+        folder_paths = [c.cloud_path for c in unloaded]
+        try:
+            batch = self._db.get_folder_batch_aggregate_status(
+                parent.cloud_path, folder_paths)
+            for child in unloaded:
+                child.status = batch.get(child.cloud_path, "cloud_only")
+        except Exception:
+            for child in unloaded:
+                child.status = "cloud_only"
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        item: FolderTreeItem = index.internalPointer()
+        # Видимый корень «Яндекс Диск»: постоянная иконка и без агрегации
+        # статуса — get_folder_aggregate_status("/") сканирует всю БД (100К+
+        # файлов) и зависла бы UI при первой отрисовке
+        if item is self._visible_root:
+            if role == Qt.DisplayRole:
+                return item.name
+            if role == Qt.DecorationRole:
+                # Значок самой программы (icon-main.ico), как в заголовке окна
+                return _app_icon()
+            if role == Qt.UserRole:
+                return item.cloud_path
+            return None
+        if role == Qt.DisplayRole:
+            if item.status is None and self._db is not None:
+                self._prefetch_sibling_statuses(item)
+            return item.name
+        if role == Qt.DecorationRole:
+            if item.status is None and self._db is not None:
+                self._prefetch_sibling_statuses(item)
+            if item.status and item.status in STATUS_ICON:
+                if is_animated_status(item.status):
+                    return _rotated_svg_icon(STATUS_ICON[item.status], 20,
+                                             angle=get_rotation_angle())
+                return _svg_icon(STATUS_ICON[item.status], 20)
+            return None
+        if role == Qt.UserRole:
+            return item.cloud_path
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return "Папки"
+        return None
+
+    def refresh(self):
+        """Сбросить модель (перезагрузка делается внешним кодом)."""
+        self.beginResetModel()
+        self._root.children.clear()
+        self._create_visible_root()
+        self._root.loaded = False  # сброс — populate_children сможет заново наполнить
+        self.endResetModel()
+
+    def invalidate_status(self, cloud_path: str = None):
+        """Сбросить кешированный статус на узле и его предках.
+        При следующем data() статус будет перечитан из БД.
+
+        Если cloud_path=None — сбросить статусы на всех узлах.
+        """
+        if cloud_path is None:
+            self._invalidate_all(self._root)
+        else:
+            seen = set()
+            self._invalidate_path(self._root, cloud_path, seen)
+
+    def _invalidate_all(self, item: FolderTreeItem):
+        item.status = None
+        for child in item.children:
+            self._invalidate_all(child)
+
+    def _invalidate_path(self, item: FolderTreeItem, cloud_path: str, seen: set) -> bool:
+        """Инвалидировать item если он сам или кто-то из его детей — cloud_path.
+        Возвращает True, если нашли.
+        """
+        if item.cloud_path == cloud_path:
+            item.status = None
+            seen.add(id(item))
+            return True
+        for child in item.children:
+            if self._invalidate_path(child, cloud_path, seen):
+                item.status = None
+                seen.add(id(item))
+                return True
+        return False
+
+    def emit_path_changed(self, cloud_path: str):
+        """Испустить dataChanged для узла и всех его предков (чтобы дерево
+        перерисовало иконки статуса на всех уровнях)."""
+        item = self._find_item(cloud_path)
+        while item and item is not self._root:
+            idx = self._index_of(item)
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+            item = item.parent
+
+    def refresh_animated_icons(self):
+        """Обновить иконки только для узлов с анимированным статусом.
+
+        Эмитит dataChanged для каждого такого узла — Qt перерисует только его
+        иконку, без полного repaint дерева. Вызывается из spin-таймера ~60 раз/с.
+        """
+        self._refresh_animated_recursive(self._root)
+
+    def _refresh_animated_recursive(self, item: FolderTreeItem):
+        if item is not self._root and item.status and is_animated_status(item.status):
+            idx = self._index_of(item)
+            self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+        for child in item.children:
+            self._refresh_animated_recursive(child)
+
+    # ── Drag & Drop support ─────────────────────────────
+
+    def mimeTypes(self):
+        return ['application/x-yadisk-cloud-paths']
+
+    def supportedDropActions(self):
+        return Qt.CopyAction | Qt.MoveAction
+
+    def canDropMimeData(self, data, action, row, column, parent):
+        """Разрешить drop: view принимает событие и рисует drop-индикатор."""
+        return data is not None and data.hasFormat('application/x-yadisk-cloud-paths')
+
+    def mimeData(self, indexes):
+        import json
+        from PySide6.QtCore import QMimeData
+        paths = []
+        seen = set()
+        for idx in indexes:
+            if idx.isValid() and idx.column() == 0:
+                cp = idx.data(Qt.UserRole)
+                # Корень диска («Яндекс Диск») не перетаскивается
+                if cp and cp != "/" and cp not in seen:
+                    paths.append(cp)
+                    seen.add(cp)
+        if not paths:
+            return None
+        mime = QMimeData()
+        mime.setData('application/x-yadisk-cloud-paths',
+                      json.dumps(paths).encode('utf-8'))
+        return mime

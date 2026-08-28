@@ -1,6 +1,6 @@
 # ☁️ YaDisk Manager
 
-[![Version](https://img.shields.io/badge/version-0.11.11-blue)](https://github.com/KiM38RuS/yadisk-manager/releases)
+[![Version](https://img.shields.io/badge/version-0.12.0-blue)](https://github.com/KiM38RuS/yadisk-manager/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)]()
 [![Windows](https://img.shields.io/badge/platform-Windows%2010%2F11-orange)]()
 
