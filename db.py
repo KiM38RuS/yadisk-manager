@@ -188,8 +188,6 @@ def get_theme() -> str:
 def set_theme(theme: str) -> None:
     _theme_cache["val"] = None  # инвалидация кеша
     update_config("theme", theme)
-
-
 # ── Язык лога ──────────────────────────────────────────────
 
 
@@ -204,6 +202,7 @@ def get_log_language() -> str:
 def set_log_language(lang: str) -> None:
     """Установить язык лога ('ru' / 'en')."""
     update_config("log_lang", lang)
+
 
 
 
