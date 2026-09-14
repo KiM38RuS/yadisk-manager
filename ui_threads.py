@@ -423,9 +423,10 @@ class RecentFilesThread(QThread):
     """Фоновый поток для загрузки недавно изменённых файлов (быстрый polling)."""
     finished = Signal(list)
 
-    def __init__(self, api, parent=None):
+    def __init__(self, api, db, parent=None):
         super().__init__(parent)
         self._api = api
+        self._db = db
 
     def run(self):
         try:
