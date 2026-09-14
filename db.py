@@ -400,6 +400,11 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_files_cloud_type_status "
             "ON files(cloud_path, type, status)"
         )
+        # Индекс для is_folder_fully_synced() — ускоряет LIKE 'prefix/%' + type='file'
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_cloud_prefix_type "
+            "ON files(cloud_path, type)"
+        )
         self._conn.commit()
 
         # ── поиск: история запросов ─────────────────────────

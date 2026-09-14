@@ -4113,7 +4113,7 @@ class MainWindow(QMainWindow):
         """Проверка изменений — быстрый запрос недавно изменённых файлов."""
         if not self.isVisible() and not self._tray.isVisible():
             return
-        thread = _RecentFilesThread(self._api, self)
+        thread = _RecentFilesThread(self._api, self._db, self)
         thread.finished.connect(self._on_poll_result)
         thread.start()
 
@@ -4121,6 +4121,8 @@ class MainWindow(QMainWindow):
         """Обработать результат poll'инга — обновить кеш, если есть изменения.
         Если в полностью скачанной папке появился новый файл — авто-загрузка.
         Если существующий downloaded файл изменился в облаке — авто-синхронизация.
+        
+        Выполняется в UI потоке, поэтому все DB операции должны быть быстрыми.
         """
         if not items:
             return
@@ -4145,6 +4147,7 @@ class MainWindow(QMainWindow):
             if changed_items:
                 logger.info("Poll: %d downloaded file(s) changed in cloud",
                             len(changed_items))
+                # Batch reverse meta fetch — не блокируем UI
                 for item in changed_items:
                     cp = item["path"]
                     lp = _local_path(cp)
@@ -4155,12 +4158,24 @@ class MainWindow(QMainWindow):
             if new_items:
                 logger.info("Poll: %d new item(s)", len(new_items))
                 auto_downloads = []
+                # Batch проверка родительских папок — один запрос вместо N
+                parent_paths = set()
                 for item in new_items:
                     cp = item["path"]
-                    # Проверяем статус родительской папки ДО добавления
                     parts = cp.rstrip("/").split("/")
                     parent = "/".join(parts[:-1]) if len(parts) > 2 else "/"
-                    was_synced = self._db.is_folder_fully_synced(parent)
+                    parent_paths.add(parent)
+                
+                # Проверяем все родительские папки одним batch запросом
+                parent_sync_status = {}
+                for pp in parent_paths:
+                    parent_sync_status[pp] = self._db.is_folder_fully_synced(pp)
+                
+                for item in new_items:
+                    cp = item["path"]
+                    parts = cp.rstrip("/").split("/")
+                    parent = "/".join(parts[:-1]) if len(parts) > 2 else "/"
+                    was_synced = parent_sync_status.get(parent, False)
 
                     self._db.upsert_file(
                         cp, item.get("name", ""),
