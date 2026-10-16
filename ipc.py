@@ -22,7 +22,7 @@ logger = logging.getLogger("ipc")
 # ⚠️ Перед релизом/компиляцией выставить False
 # В разработке держать True — позволяет перезагружать программу
 # через: python -c "from ipc import send_ipc_command; send_ipc_command('restart')"
-IPC_ENABLED = False
+IPC_ENABLED = True
 
 IPC_PORT = 43210
 
