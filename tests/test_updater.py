@@ -63,7 +63,7 @@ class TestIsNewer(unittest.TestCase):
 
 
 class TestFindUpdate(unittest.TestCase):
-    """find_update с мокнутым requests.get."""
+    """find_update с мокнутой общей сессией (get_shared_session)."""
 
     def _release(self, tag, assets):
         return mock.Mock(
@@ -71,22 +71,37 @@ class TestFindUpdate(unittest.TestCase):
             json=lambda: {"tag_name": tag, "body": "notes", "assets": assets},
         )
 
+    def _patch_session(self, response_or_side_effect):
+        """Подменить get_shared_session() на фиктивный объект, чей .get(...)
+        возвращает response_or_side_effect.
+
+        Если передан requests.RequestException (или любой BaseException) —
+        это side_effect. Иначе — return_value.
+
+        После PLANS.md 2.15 fetch_latest_release ходит через
+        get_shared_session().get(), а не голый requests.get — поэтому
+        мокаем именно session.get().
+        """
+        mock_session = mock.Mock()
+        if isinstance(response_or_side_effect, BaseException):
+            mock_session.get.side_effect = response_or_side_effect
+        else:
+            mock_session.get.return_value = response_or_side_effect
+        return mock.patch("updater.get_shared_session", return_value=mock_session)
+
     def test_no_repo(self):
         self.assertIsNone(updater.find_update("", "0.11.6"))
 
     def test_network_error_graceful(self):
-        with mock.patch("updater.requests.get",
-                        side_effect=requests.RequestException("boom")):
+        with self._patch_session(requests.RequestException("boom")):
             self.assertIsNone(updater.find_update("u/r", "0.11.6"))
 
     def test_404_graceful(self):
-        with mock.patch("updater.requests.get",
-                        return_value=mock.Mock(status_code=404)):
+        with self._patch_session(mock.Mock(status_code=404)):
             self.assertIsNone(updater.find_update("u/r", "0.11.6"))
 
     def test_no_releases_yet_same_version(self):
-        with mock.patch("updater.requests.get",
-                        return_value=self._release("v0.11.6", [])):
+        with self._patch_session(self._release("v0.11.6", [])):
             self.assertIsNone(updater.find_update("u/r", "0.11.6"))
 
     def test_finds_exe_asset(self):
@@ -96,8 +111,7 @@ class TestFindUpdate(unittest.TestCase):
             {"name": "YaDiskManager.exe",
              "browser_download_url": "https://x/YaDiskManager.exe", "size": 55},
         ]
-        with mock.patch("updater.requests.get",
-                        return_value=self._release("v0.12.0", assets)):
+        with self._patch_session(self._release("v0.12.0", assets)):
             info = updater.find_update("u/r", "0.11.6")
         self.assertIsNotNone(info)
         self.assertEqual(info.version, "0.12.0")
@@ -110,13 +124,11 @@ class TestFindUpdate(unittest.TestCase):
             {"name": "Setup_YaDiskManager_v0.12.0.exe",
              "browser_download_url": "https://x/Setup.exe", "size": 5},
         ]
-        with mock.patch("updater.requests.get",
-                        return_value=self._release("v0.12.0", assets)):
+        with self._patch_session(self._release("v0.12.0", assets)):
             self.assertIsNone(updater.find_update("u/r", "0.11.6"))
 
     def test_no_assets_no_update(self):
-        with mock.patch("updater.requests.get",
-                        return_value=self._release("v0.12.0", [])):
+        with self._patch_session(self._release("v0.12.0", [])):
             self.assertIsNone(updater.find_update("u/r", "0.11.6"))
 
 

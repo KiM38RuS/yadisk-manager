@@ -844,7 +844,7 @@ class Database:
             """, (md5, now, cloud_path))
             self._conn.commit()
 
-    _VALID_STATUSES = frozenset({"cloud_only", "downloaded", "modified", "syncing", "unknown", "deleting"})
+    _VALID_STATUSES = frozenset({"cloud_only", "downloaded", "modified", "syncing", "unknown", "deleting", "locked"})
 
     def set_status(self, cloud_path: str, status: str) -> None:
         """Установить произвольный статус файла/папки."""
@@ -856,6 +856,32 @@ class Database:
                 UPDATE files SET status=?, updated_at=?
                 WHERE cloud_path=?
             """, (status, now, cloud_path))
+            self._conn.commit()
+        self.invalidate_folder_cache(cloud_path)
+
+    def set_locked(self, cloud_path: str, local_path: str = "") -> None:
+        """Пометить файл как заблокированный (открыт в редакторе).
+
+        Используется, когда DownloadWorker/UploadWorker получает
+        PermissionError [Errno 13] / "being used by another process" —
+        UI показывает иконку close-ellipse-red.svg и подсказку
+        «закройте файл в редакторе». local_path сохраняем, чтобы
+        при следующей попытке можно было переписать, не теряя связь.
+        """
+        now = _now()
+        with self._lock:
+            if local_path:
+                self._conn.execute("""
+                    UPDATE files SET status='locked', local_path=COALESCE(local_path, ?),
+                                     local_mtime=COALESCE(local_mtime, ?),
+                                     updated_at=?
+                    WHERE cloud_path=?
+                """, (local_path, now, now, cloud_path))
+            else:
+                self._conn.execute("""
+                    UPDATE files SET status='locked', updated_at=?
+                    WHERE cloud_path=?
+                """, (now, cloud_path))
             self._conn.commit()
         self.invalidate_folder_cache(cloud_path)
 

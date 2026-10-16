@@ -1,0 +1,3 @@
+PySide6>=6.5,<7
+requests>=2.31,<3
+watchdog>=4.0,<5

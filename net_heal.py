@@ -200,7 +200,17 @@ class DoHResolver:
 
     def __init__(self, timeout_s: float = DOH_TIMEOUT_S, session=None):
         self._timeout_s = timeout_s
-        self._session = session if session is not None else requests.Session()
+        if session is not None:
+            self._session = session
+        else:
+            # Своя сессия: НЕ get_shared_session() (та использует дефолтный
+            # HTTPAdapter, а нам нужен HealedAdapter — иначе рекурсия при обходе
+            # блокировок). Но пул должен быть >1, иначе при сбое резолвера
+            # несколько потоков сериализуются на одном коннекте к DoH.
+            self._session = requests.Session()
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=10, pool_maxsize=10)
+            self._session.mount("https://", adapter)
 
     def resolve(self, host: str) -> tuple[list[str], int]:
         """A-записи хоста и TTL (зажатый в [TTL_MIN_S..TTL_MAX_S]).

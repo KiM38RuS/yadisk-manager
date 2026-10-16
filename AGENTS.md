@@ -3,7 +3,7 @@
 > Identity: Python developer, PySide6 GUI, REST API integrations.
 > Language: user speaks Russian, code/replies in Russian or English.
 > Knowledge base root: `D:\\YandexDisk\\Sync\\Coding\\AIWikiVault`
-> Current version: **0.12.0** (see `Backup/` for history)
+> Current version: **0.12.2** (see `Backup/` for history)
 >
 > ## 📦 Версии и бэкапы
 >
@@ -38,19 +38,24 @@
 ```
 main.py              → точка входа, QApplication, инициализация
 ├── ui.py            → MainWindow (окно, трей, навигация, очереди, ~3.4 K)
-│   ├── ui_shared.py          → константы, _svg_icon, _cache_dir, хелперы
+│   ├── ui_shared.py          → константы, _svg_icon, _cache_dir, is_file_locked_error, хелперы
 │   ├── ui_braille_spinner.py → анимированный спиннер (Braille)
+│   ├── ui_wave_spinner.py    → индикатор загрузки (QLabel + QTimer, 9 px)
+│   ├── ui_breadcrumbs.py     → BreadcrumbBar (кликабельный путь, адресная строка)
 │   ├── ui_log.py             → LogSignal, LogHandler, LogWindow
 │   ├── ui_workers.py         → DownloadWorker, UploadWorker, ZipDownloadWorker
 │   ├── ui_tree_model.py      → FolderTreeItem, FolderTreeModel
 │   ├── ui_table_model.py     → RowHoverDelegate, FileTableModel, FileTableSortModel
 │   ├── ui_dialogs.py         → AuthDialog, SettingsDialog
-│   ├── ui_threads.py         → 10 классов QThread (Sync, ApiList, Search, …)
+│   ├── ui_threads.py         → 10 классов QThread (Sync, ApiList, Search, AllFiles, …)
 ├── ui_search_edit.py     → SearchEdit (строка поиска с историей)
 ├── updater.py            → система обновлений (GitHub Releases, прогресс, apply+relaunch)
+├── net_heal.py           → обход DNS/TCP-блокировок (DoH, TTL-кэш IP, HealedAdapter)
+├── l10n.py               → локализация лога (LogTranslatingFormatter, ru/en)
+├── ipc.py                → TCP 127.0.0.1:43210 (управление из терминала; IPC_ENABLED)
 ├── sync.py          → двусторонняя MD5-синхронизация (full_sync, migrate_cache)
 ├── db.py            → SQLite (статусы файлов) + JSON-конфиг (токен)
-├── disk_api.py      → REST API Яндекс.Диска (навигация, CRUD, публичные ссылки)
+├── disk_api.py      → REST API Яндекс.Диска (get_shared_session, CRUD, публичные ссылки)
 ├── watcher.py       → watchdog (следит за изменениями локального кеша → авто-загрузка)
 ├── research.md      → исследование вариантов обратной синхронизации
 └── requirements.txt → PySide6, requests, watchdog

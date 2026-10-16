@@ -225,10 +225,47 @@ class SettingsDialog(QDialog):
         logger.info("Theme selected in settings combo: %r (was %r)",
                     theme, db.get_theme())
         db.set_theme(theme)
+        # Если диалог уже закрывается — НЕ запускаем live-apply. Иначе
+        # _apply_theme выполняет app.setStyleSheet() во время уничтожения
+        # комбобокса, что ломает кучу Qt (process завершается без traceback,
+        # main.py «вылетает без ошибки»). Тема уже сохранена в БД выше —
+        # применится при следующем запуске.
+        if getattr(self, '_closing', False):
+            return
         parent = self.parent()
         if parent and hasattr(parent, '_apply_theme'):
             QTimer.singleShot(0, parent._apply_theme)
 
+    def accept(self):
+        """Помечаем диалог как закрывающийся ДО accept(), чтобы любой
+        отложенный singleShot(0, _apply_theme) из _on_theme_changed
+        не выполнился во время уничтожения виджетов диалога.
+        """
+        self._closing = True
+        # Отключаем сигнал комбобокса, чтобы PaletteChange/SetStyleSheet
+        # при apply не вызвал повторный currentIndexChanged на закрытом
+        # диалоге (см. STATUS_HEAP_CORRUPTION в логе).
+        try:
+            self._theme_combo.currentIndexChanged.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        super().accept()
+
+    def reject(self):
+        self._closing = True
+        try:
+            self._theme_combo.currentIndexChanged.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        super().reject()
+
+    def closeEvent(self, event):
+        self._closing = True
+        try:
+            self._theme_combo.currentIndexChanged.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        super().closeEvent(event)
     def _save(self):
         _autorun_set(self._chk_autorun.isChecked())
         new_cache = self._cache_edit.text().strip()
@@ -257,6 +294,10 @@ class SettingsDialog(QDialog):
         # в комбобоксе (_on_theme_changed). Повторный _apply_theme() при
         # закрытии диалога вызывает полный unpolish/polish всех виджетов,
         # что в PySide6 даёт STATUS_HEAP_CORRUPTION (0xc0000374).
+        # Защита от крэша при клике OK сразу после live-apply: accept()
+        # выставляет _closing=True и отключает сигнал комбобокса, чтобы
+        # любой отложенный singleShot(0, _apply_theme) не выполнился
+        # во время уничтожения виджетов диалога.
         self.accept()
 
 

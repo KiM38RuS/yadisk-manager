@@ -139,7 +139,7 @@ def test_breadcrumb_navigate_rejects_file_path(qapp):
 
 def test_focus_address_bar_shows_editor(qapp):
     """Ctrl+L / Alt+D → show_editor()."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
     mw = MagicMock()
     ui_mod.MainWindow._focus_address_bar(mw)
@@ -159,7 +159,7 @@ def test_ancestor_paths(qapp):
 def test_tree_sync_step_expands_existing(qapp):
     """Все узлы пути есть в дереве и загружены → раскрыть без БД/API-ожидания."""
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -177,7 +177,7 @@ def test_tree_sync_step_expands_existing(qapp):
 
 def test_tree_sync_step_fetches_db_children(qapp, monkeypatch):
     """Узла нет в дереве → ходок запрашивает детей родителя из БД и ждёт колбэк."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     created = []
@@ -210,7 +210,7 @@ def test_tree_sync_step_fetches_db_children(qapp, monkeypatch):
 
 def test_tree_sync_db_children_callback(qapp):
     """Колбэк БД: успех → вставить детей и продолжить; ошибка → завершить."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     # Успех: populate + продолжение ходока
@@ -228,7 +228,7 @@ def test_tree_sync_db_children_callback(qapp):
 
 def test_tree_sync_stale_gen_ignored(qapp):
     """Ответ от предыдущего хода (gen устарел) полностью игнорируется."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -243,7 +243,7 @@ def test_tree_sync_stale_gen_ignored(qapp):
 
 def test_navigate_to_folder_select_after_overrides_selection(qapp):
     """select_after подменяет снимок выделения и уходит в ходок дерева."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -254,12 +254,12 @@ def test_navigate_to_folder_select_after_overrides_selection(qapp):
     # Таблица: после загрузки выделяется бывшая папка, а не старый снимок
     assert mw._pending_selection == ["/A/B"]
     # Дерево: ходок получил бывшую папку как цель подсветки
-    mw._sync_tree_to_path.assert_called_once_with("/A", select_after="/A/B")
+    mw._sync_tree_to_path.assert_called_once_with("/A", select_after="/A/B", nav_gen=ANY)
 
 
 def test_navigate_to_folder_without_select_after_keeps_selection(qapp):
     """Обычная навигация: снимок выделения не подменяется, select_after=None."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -267,12 +267,12 @@ def test_navigate_to_folder_without_select_after_keeps_selection(qapp):
     ui_mod.MainWindow._navigate_to_folder(mw, "/Y")
 
     assert mw._pending_selection == ["/X/файл.txt"]
-    mw._sync_tree_to_path.assert_called_once_with("/Y", select_after=None)
+    mw._sync_tree_to_path.assert_called_once_with("/Y", select_after=None, nav_gen=ANY)
 
 
 def test_sync_tree_to_path_stores_select_after(qapp):
     """Ходок запоминает select_after рядом с целью (для финального выделения)."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -287,7 +287,7 @@ def test_sync_tree_to_path_stores_select_after(qapp):
 def test_tree_sync_finish_prefers_select_after(qapp):
     """Финал ходока: подсвечивается бывшая папка, а не пункт назначения."""
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -307,7 +307,7 @@ def test_tree_sync_finish_prefers_select_after(qapp):
 def test_tree_sync_finish_falls_back_to_target(qapp):
     """Бывшей папки нет в дереве → откат на подсветку пункта назначения."""
     from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -324,7 +324,7 @@ def test_tree_sync_finish_falls_back_to_target(qapp):
 
 def test_nav_up_passes_departed_folder(qapp):
     """Кнопка «Вверх» / Alt+Up: бывшая папка уходит в select_after."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()
@@ -353,7 +353,7 @@ def test_backspace_passes_departed_folder(qapp):
 
 def test_parent_nav_row_passes_departed_folder(qapp):
     """Двойной клик по строке «..»: бывшая папка уходит в select_after."""
-    from unittest.mock import MagicMock
+    from unittest.mock import MagicMock, ANY
     import ui as ui_mod
 
     mw = MagicMock()

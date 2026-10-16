@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.12.2 (2026-10-16)
+
+- **Улучшено (критично)**: стартовая загрузка всего содержимого Диска стала в разы быстрее (`ui_threads.py`, `AllFilesThread`) — PLANS 2.1:
+  - `PAGE_LIMIT` 200 → **500** (лимит API — 1000, 500 — баланс размера ответа и времени парсинга/записи в БД)
+  - **параллельная загрузка страниц** через `ThreadPoolExecutor(max_workers=CONCURRENT_PAGES=4)` — 4 страницы запрашиваются одновременно, сортируются по offset и пишутся в БД по порядку; общий объём запросов к API сокращается в 4 раза
+  - `request_stop` корректно прерывает пачку (`cancel_futures`) и сохраняет текущий offset
+  - пул соединений `POOL_SIZE=30` держит одновременные запросы (см. ниже), главный поток не страдает
+- **Исправлено (критическое)**: CRITICAL-шторм «Internal C++ object already deleted» в `_process_result_queue` — PLANS 2.14:
+  - `SyncThread`/любой `QThread` после `cancel()` + GC становился удалённым C++ объектом, а ссылка оставалась в `self._active_threads`; 100-мс таймер каждую секунду падал с `RuntimeError` на `t.isRunning()` (в логе — десятки CRITICAL-блоков подряд)
+  - фикс: `ui.py: _is_thread_alive()` — `isRunning()` в `try/except RuntimeError`, мёртвые потоки вычищаются из списка
+- **Исправлено**: шторм «Connection pool is full, discarding connection» (200+ предупреждений за сессию) — PLANS 2.15:
+  - `disk_api.get_shared_session()` — общий singleton `requests.Session` с `HTTPAdapter(pool_connections=30, pool_maxsize=30)`, смонтированный на `http://` и `https://`
+  - `YaDiskAPI`, `updater.fetch_latest_release`/`download_update` переведены на эту сессию; раньше `requests.get()` создавал дефолтную сессию с `maxsize=1`
+  - `net_heal.DoHResolver` — своя сессия с пулом 10 (нужен `HealedAdapter`, чтобы не было рекурсии при обходе блокировок)
+- **Исправлено**: двойной запуск `ApiListThread` для одной папки — PLANS 2.16: `MainWindow._loading_paths: set[str]` — защита «папка уже грузится» в `_fetch_folder_list`; второй поток не стартует, результат первого не перетирается
+- **Исправлено**: гонка навигации «таблица ↔ дерево» — PLANS 1.2: `_sync_tree_to_path`/`_load_folder_local` получили `nav_gen` (generation-токен), `_nav_op_done()` отбрасывает устаревшие колбэки — выделение больше не прыгает при быстрых переходах
+- **Исправлено (критическое)**: STATUS_HEAP_CORRUPTION при быстром клике «OK» в настройках после смены темы — процесс завершался без traceback, «main.py вылетал без ошибки»:
+  - Причина: `SettingsDialog._on_theme_changed` планирует `parent._apply_theme` через `QTimer.singleShot(0)`. Если пользователь сразу нажимал OK, `accept()` запускал уничтожение виджетов диалога, и отложенный `singleShot` срабатывал во время destroy-цепочки — `app.setStyleSheet()` повторно триггерил `currentIndexChanged` на уже умирающем `QComboBox`, Qt повреждал кучу (0xc0000374)
+  - Защита: переопределены `accept()` / `reject()` / `closeEvent()` — выставляют `self._closing=True` и отключают `currentIndexChanged` от комбобокса. `_on_theme_changed` при `_closing=True` ничего не планирует (тема уже сохранена в БД через `db.set_theme` ранее, применится при следующем запуске или через активный live-apply, если успел до `_closing=True`)
+- **Тесты**: `tests/test_settings_dialog_close.py` — 5 тестов (флаги `_closing` на accept/reject/closeEvent, отключение сигнала, `_on_theme_changed` после close не запускает `parent._apply_theme`)
+
+## v0.12.1 (2026-09-05)
+
+- **Новое**: обработка «файл заблокирован» (открыт в редакторе) — больше не валит воркер в логе:
+  - `ui_shared.is_file_locked_error()` — детектит `PermissionError [Errno 13]` и варианты сообщений Windows («being used by another process», «Отказано в доступе»)
+  - `DownloadWorker`/`UploadWorker` — новый сигнал `locked(path)`; статус `'locked'` с иконкой `close-ellipse-red.svg` (эллипс с крестиком)
+  - `db.set_locked()` — отдельный метод, сохраняет `local_path`, чтобы можно было повторить попытку
+  - `ui._on_file_locked()` — освобождает слот нужной очереди, обновляет таблицу/дерево, выводит `🔒 <имя> — открыт в другой программе…` в статус-баре на 10 с
+- **Новое**: ссылка на GitHub в окне «О программе» — `https://github.com/KiM38RuS/yadisk-manager` (кликабельная, открывается во внешнем браузере)
+- **Новое**: пункт «Проверить обновления…» в меню «Справка» (рядом с «О программе»); иконка `refresh.svg`, тот же обработчик, что и в трее
+- **Новое**: во время проверки обновлений — брайль-спиннер и текст «Проверка обновлений…» в строке состояния; кнопка меню дизейблится до получения результата
+- **Улучшено**: при ручной проверке обновлений в случае сетевой ошибки показывается `QMessageBox` с пояснением; «обновлений нет» — трей-уведомление «Установлена последняя версия»
+- **Ассеты**: новые иконки `Assets/close-ellipse.svg` (чёрная) и `Assets/close-ellipse-red.svg` (красная, `#C0392B`); старая пустышка `close-ellipse-svgrepo-com.svg` удалена
+- **Тесты**: `tests/test_locked_file.py` — 8 тестов (PermissionError, OSError(errno=13), Windows-маркер «being used», русский «Отказано в доступе», отсутствие ложных срабатываний)
+
 ## v0.12.0 (2026-08-28)
 
 - **Новое**: лог теперь читается на русском — система локализации лога (`l10n.py`):

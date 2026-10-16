@@ -98,6 +98,23 @@ def event_type_name(et: int) -> str:
                         if isinstance(v, QEvent.Type)}
     return _EVENT_NAMES.get(et, f"UNKNOWN({et})")
 
+
+def _is_thread_alive(thread) -> bool:
+    """Безопасно проверить, жив ли QThread (C++ объект ещё не удалён).
+
+    Вызывает t.isRunning() под защитой try/except RuntimeError — без защиты
+    shiboken6 падает с 'Internal C++ object (...) already deleted', если тред
+    был собран GC или закрыт, но Python-обёртка осталась в списке
+    (см. PLANS.md 2.14 — CRITICAL-шторм в _process_result_queue).
+    Возвращает False для удалённого объекта — такой тред можно убирать.
+    """
+    if thread is None:
+        return False
+    try:
+        return thread.isRunning()
+    except RuntimeError:
+        return False
+
 class MainWindow(QMainWindow):
     def __init__(self, api: disk_api.YaDiskAPI,
                  database: db.Database,
@@ -109,6 +126,8 @@ class MainWindow(QMainWindow):
         self._current_path = "/"
         # После загрузки всех файлов переключаемся на навигацию через API
         self._last_requested_path = "/"
+        # Защита от дублей запуска ApiListThread — путь, который уже загружается
+        self._loading_paths: set[str] = set()
         # Последний успешно загруженный путь (откат крошек при ошибке)
         self._last_good_path = "/"
         self._syncing: set[str] = set()
@@ -126,6 +145,15 @@ class MainWindow(QMainWindow):
         self._nav_history: list[str] = []
         self._nav_index: int = -1
         self._nav_history_suppress: bool = False
+
+        # Навигация в процессе: токен поколения + счётчик активных операций.
+        # Пока self._navigating == True, _on_tree_selection_changed и
+        # _on_table_selection_changed НЕ очищают выделение в другой панели
+        # (фикс PLANS.md 1.2: при «..» / двойном клике по таблице дерево
+        # не должно сбрасываться, а при клике по дереву — таблица).
+        self._nav_gen: int = 0
+        self._navigating: bool = False
+        self._nav_ops_pending: int = 0
 
         # Буфер для Copy/Paste/Cut — список (cloud_path, action)
         self._clipboard_buffer: list[tuple[str, str]] = []  # (cloud_path, 'copy'|'cut')
@@ -378,9 +406,14 @@ class MainWindow(QMainWindow):
 
     def _fetch_folder_list(self, path, on_done):
         """Запросить список папок/файлов в фоновом потоке."""
+        if path in self._loading_paths:
+            logger.debug("ApiListThread: %s уже загружается, игнорируем", path)
+            return
+        self._loading_paths.add(path)
         logger.info("Fetching %s...", path)
         thread = _ApiListThread(self._api, path, self)
         thread.finished.connect(lambda items, err: on_done(items, err))
+        thread.finished.connect(lambda: self._loading_paths.discard(path))
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
@@ -416,20 +449,25 @@ class MainWindow(QMainWindow):
         self._start_folder_load("/", use_api=True, after_all_files=True)
 
     def _start_folder_load(self, path: str, use_api: bool = True,
-                           after_all_files: bool = False):
+                           after_all_files: bool = False,
+                           nav_gen: int = -1):
         """Загрузить содержимое папки в фоновом потоке (API + SQLite + fs).
 
         Все запросы к БД выполняются в FolderLoadThread — главный поток
         только применяет готовые данные к модели таблицы (v0.11.5,
         устранение FREEZE UI при старте/навигации на БД 100К+ файлов).
+
+        nav_gen (-1 = нет навигации): токен поколения. Колбэк _on_folder_loaded
+        в конце уменьшает self._nav_ops_pending (если gen совпадает с
+        текущим self._nav_gen). Фикс PLANS.md 1.2.
         """
         thread = _FolderLoadThread(
             self._api, self._db, path, use_api=use_api,
             recently_deleted=self._recently_deleted,
             syncing=self._syncing, parent=self)
         thread.finished.connect(
-            lambda p, i, f, r, e, _aaf=after_all_files:
-                self._on_folder_loaded(p, i, f, r, e, _aaf))
+            lambda p, i, f, r, e, _aaf=after_all_files, _g=nav_gen:
+                self._on_folder_loaded(p, i, f, r, e, _aaf, _g))
         thread.finished.connect(thread.deleteLater)
         self._active_threads.append(thread)
         thread.finished.connect(lambda: self._cleanup_thread(thread))
@@ -437,8 +475,15 @@ class MainWindow(QMainWindow):
 
     def _on_folder_loaded(self, path: str, items: list, fixed_paths: list,
                           reverse_checks: list, error: str,
-                          after_all_files: bool = False):
-        """Применить результат FolderLoadThread к UI (только быстрые операции)."""
+                          after_all_files: bool = False,
+                          nav_gen: int = -1):
+        """Применить результат FolderLoadThread к UI (только быстрые операции).
+
+        nav_gen: токен поколения навигации (>=0). Если >=0 и совпадает
+        с текущим self._nav_gen — уменьшаем self._nav_ops_pending.
+        Если == -1 — не навигационная загрузка, не трогаем счётчик.
+        Фикс PLANS.md 1.2.
+        """
         if error:
             logger.error("Folder load failed for %s: %s", path, error)
             if self._is_auth_error(error):
@@ -447,6 +492,7 @@ class MainWindow(QMainWindow):
                 self._hide_loading()
                 self._hide_left_busy()
                 self._hide_table_loading()
+                self._nav_op_done(nav_gen, f"folder-load-error:{path}")
                 return
             self._hide_left_busy()
             self.statusBar().showMessage(f"❌ {error}")
@@ -455,11 +501,15 @@ class MainWindow(QMainWindow):
             # если пользователь всё ещё ждёт именно эту папку (не ушёл дальше)
             if path == self._current_path:
                 self._breadcrumb_bar.set_path(self._last_good_path)
+            self._nav_op_done(nav_gen, f"folder-load-failed:{path}")
             return
         # Защита от race: пользователь уже ушёл в другую папку
         if path != self._current_path:
             logger.debug("Ignored stale folder load for %s (current %s)",
                          path, self._current_path)
+            # Stale-загрузка всё равно завершилась — уменьшаем счётчик,
+            # чтобы _navigating не завис навсегда
+            self._nav_op_done(nav_gen, f"folder-load-stale:{path}")
             return
         # Папка загружена — запоминаем как последний хороший путь (для отката)
         self._last_good_path = path
@@ -488,6 +538,8 @@ class MainWindow(QMainWindow):
             self._restore_selection(self._pending_selection)
         if after_all_files:
             self._start_all_files_load()
+        # Шаг 1 или Шаг 2 навигации завершён успешно — уменьшаем счётчик
+        self._nav_op_done(nav_gen, f"folder-load-ok:{path}")
 
     def _start_all_files_load(self):
         """Запустить фоновую загрузку полного списка файлов (для локальной навигации)."""
@@ -1549,8 +1601,16 @@ class MainWindow(QMainWindow):
     # ── Toolbar: состояние кнопок ──────────────────────────
 
     def _on_tree_selection_changed(self, selected, deselected):
-        """При изменении выделения в дереве → снять выделение в таблице."""
-        if self._selection_updating:
+        """При изменении выделения в дереве → снять выделение в таблице.
+
+        Исключения:
+        - self._selection_updating: reentry-guard (Qt вложенно шлёт сигналы)
+        - self._navigating: идёт навигация (таблица перерисовывается,
+          её выделение восстановится через _restore_selection) — не
+          трогать её, иначе дерево сбросит только что выставленное
+          _tree_sync_finish() выделение. Фикс PLANS.md 1.2.
+        """
+        if self._selection_updating or self._navigating:
             return
         self._selection_updating = True
         self.table_view.clearSelection()
@@ -1559,8 +1619,11 @@ class MainWindow(QMainWindow):
         self._update_selection_counter()
 
     def _on_table_selection_changed(self, selected, deselected):
-        """При изменении выделения в таблице → снять выделение в дереве."""
-        if self._selection_updating:
+        """При изменении выделения в таблице → снять выделение в дереве.
+
+        Исключения: см. _on_tree_selection_changed.
+        """
+        if self._selection_updating or self._navigating:
             return
         self._selection_updating = True
         self.tree_view.clearSelection()
@@ -3212,7 +3275,7 @@ class MainWindow(QMainWindow):
             finally:
                 try:
                     threads_to_remove = [t for t in self._active_threads
-                                         if not t.isRunning()]
+                                         if not _is_thread_alive(t)]
                     for t in threads_to_remove:
                         self._active_threads.remove(t)
                 except ValueError:
@@ -3797,7 +3860,8 @@ class MainWindow(QMainWindow):
             out.append(cur)
         return out
 
-    def _sync_tree_to_path(self, path: str, select_after: str = None):
+    def _sync_tree_to_path(self, path: str, select_after: str = None,
+                           nav_gen: int = -1):
         """Раскрыть дерево до path и выделить целевую папку.
 
         Недостающих детей берём из БД (DbChildrenThread) — мгновенно;
@@ -3805,6 +3869,10 @@ class MainWindow(QMainWindow):
         блокирует ходок.
         select_after (подъём вверх): в финале ходок подсвечивает папку,
         из которой вышли, а не пункт назначения.
+
+        nav_gen: токен навигации (>=0). Когда ходок завершится,
+        _tree_sync_finish() уменьшит self._nav_ops_pending. -1 = не
+        навигационный вызов. Фикс PLANS.md 1.2.
         """
         # Токен поколения: навигация во время хода инвалидирует колбэки
         # предыдущего хода (иначе поздний ответ выделит устаревшую цель)
@@ -3813,6 +3881,7 @@ class MainWindow(QMainWindow):
         self._tree_sync_queue = self._ancestor_paths(path)
         self._tree_sync_target = path
         self._tree_sync_select_after = select_after
+        self._tree_sync_nav_gen = nav_gen  # для _tree_sync_finish()
         self._tree_sync_step(gen)
 
     def _tree_sync_step(self, gen: int):
@@ -3886,6 +3955,9 @@ class MainWindow(QMainWindow):
                 idx, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
             self._selection_updating = False
             self.tree_view.scrollTo(idx)
+        # Шаг 3 навигации завершён (успех или ранний выход) — уменьшаем счётчик
+        nav_gen = getattr(self, "_tree_sync_nav_gen", -1)
+        self._nav_op_done(nav_gen, f"tree-sync-finish:{self._tree_sync_target}")
 
     def _navigate_to_folder(self, path: str, select_after: str = None):
         """Мгновенно показать папку из локального кеша, затем в фоне загрузить
@@ -3894,7 +3966,18 @@ class MainWindow(QMainWindow):
         Сохраняет путь в истории навигации для кнопок Назад/Вперёд.
         select_after (подъём вверх): после загрузки выделяем папку,
         из которой вышли (в таблице и в дереве).
+
+        Фикс PLANS.md 1.2: на всё время навигации (Шаг 1 SQL + Шаг 2 API
+        + Шаг 3 дерево) выставляем self._navigating, чтобы выделение
+        в дереве и таблице не сбрасывали друг друга в процессе.
         """
+        # Токен поколения — устаревшие колбэки не сбрасывают флаги новой навигации
+        self._nav_gen += 1
+        # 3 асинхронные операции: Шаг 1 (SQL таблица), Шаг 2 (API таблица),
+        # Шаг 3 (синхронизация дерева). Каждая в своём _nav_op_done() уменьшает
+        # счётчик; когда все три готовы (или устарели) — снимаем _navigating.
+        self._navigating = True
+        self._nav_ops_pending = 3
         # Не добавляем в историю если это та же папка или подавлено
         if path != self._current_path and not self._nav_history_suppress:
             # Обрезаем будущее, если мы были не в конце истории
@@ -3925,14 +4008,34 @@ class MainWindow(QMainWindow):
 
         # Шаг 1: из БД (без спиннера; SQLite в фоновом потоке)
         self._pending_selection = saved_selection
-        self._load_folder_local(path)
+        # gen захватывается замыканием — даже если пользователь стартует
+        # новую навигацию до завершения текущей, устаревший колбэк
+        # увидит несовпадение gen и не сбросит _navigating новой навигации
+        gen = self._nav_gen
+        self._load_folder_local(path, nav_gen=gen)
 
         # Шаг 2: в фоне — API (обновление БД; перерисовка только если
         # набор путей изменился — см. _on_folder_loaded)
-        self._start_folder_load(path, use_api=True)
+        self._start_folder_load(path, use_api=True, nav_gen=gen)
 
         # Шаг 3: дерево следует за навигацией (раскрытие + выделение)
-        self._sync_tree_to_path(path, select_after=select_after)
+        self._sync_tree_to_path(path, select_after=select_after, nav_gen=gen)
+
+    def _nav_op_done(self, gen: int, op_name: str = "?"):
+        """Уменьшить счётчик активных операций навигации.
+
+        gen: токен поколения. Если навигация уже была перезапущена
+        (новый _navigate_to_folder), устаревший колбэк игнорируется —
+        счётчик уже сброшен в новой навигации.
+        """
+        if gen != self._nav_gen:
+            return
+        self._nav_ops_pending -= 1
+        if self._nav_ops_pending <= 0:
+            self._nav_ops_pending = 0
+            self._navigating = False
+        logger.debug("Nav op done: %s (pending=%d, navigating=%s)",
+                     op_name, self._nav_ops_pending, self._navigating)
 
     def _open_selected_item(self):
         """Открыть выделенный элемент в таблице (аналог двойного клика)."""
@@ -4009,10 +4112,15 @@ class MainWindow(QMainWindow):
         self._show_table_loading()
         self._start_folder_load(path, use_api=True)
 
-    def _load_folder_local(self, path: str):
-        """Навигация по локальному кешу (без API) — SQLite в фоновом потоке."""
+    def _load_folder_local(self, path: str, nav_gen: int = -1):
+        """Навигация по локальному кешу (без API) — SQLite в фоновом потоке.
+
+        nav_gen: токен поколения навигации (>=0) — пробрасывается в
+        _start_folder_load → _on_folder_loaded, чтобы уменьшить
+        self._nav_ops_pending. -1 = не навигационная загрузка. Фикс PLANS.md 1.2.
+        """
         self._current_path = path
-        self._start_folder_load(path, use_api=False)
+        self._start_folder_load(path, use_api=False, nav_gen=nav_gen)
 
     # ── Обратная синхронизация (облако → локальный кеш) ──────
 
@@ -5509,14 +5617,20 @@ class MainWindow(QMainWindow):
                 t.cancel()
             except AttributeError:
                 t.quit()
-            t.wait(2000)  # 2 секунды на каждый поток
-            if t.isRunning():
-                # Поток висит — terminate (крайняя мера)
-                try:
+            except RuntimeError:
+                # C++ объект уже удалён (shiboken: already deleted) — пропускаем
+                continue
+            try:
+                t.wait(2000)  # 2 секунды на каждый поток
+            except RuntimeError:
+                continue
+            try:
+                if t.isRunning():
+                    # Поток висит — terminate (крайняя мера)
                     t.terminate()
                     t.wait(500)
-                except AttributeError:
-                    pass
+            except RuntimeError:
+                pass
         self._active_threads.clear()
         if db.get_save_window_geometry():
             db.set_window_geometry(

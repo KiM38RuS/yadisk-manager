@@ -1,7 +1,7 @@
 # ☁️ YaDisk Manager — Дизайн-документ
 
-> Версия: 0.12.0
-> Дата: 2026-08-28
+> Версия: 0.12.2
+> Дата: 2026-10-16
 > Цель: создать рабочую копию программы «Яндекс Диск» 3.0 для ПК, не требующую подписки Яндекс 360
 
 ---
@@ -608,6 +608,48 @@ D:\Program_Files\YaDiskManager\
     ├── 0.3/
     └── ...
 ```
+
+---
+
+## Изменения v0.12.1 — v0.12.2
+
+### Сеть и производительность
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `disk_api.get_shared_session()` | Новый singleton: общий `requests.Session` с `HTTPAdapter(pool_connections=30, pool_maxsize=30)`, смонтированным на `http://` и `https://`. Раньше каждое голое `requests.get()` создавало сессию с дефолтным `maxsize=1` → шторм «Connection pool is full, discarding connection» при параллельных воркерах. На общую сессию переведены `YaDiskAPI`, `updater.fetch_latest_release`, `updater.download_update` |
+| `net_heal.DoHResolver` | Своя сессия с пулом 10 (не `get_shared_session()` — нужен `HealedAdapter`, иначе рекурсия при обходе блокировок) |
+| `ui_threads.AllFilesThread` | `PAGE_LIMIT` 200 → 500; параллельная загрузка страниц через `ThreadPoolExecutor(max_workers=CONCURRENT_PAGES=4)`: пачка offset'ов запрашивается одновременно, результаты сортируются по offset и пишутся в БД по порядку; `request_stop` прерывает пачку через `cancel_futures` и сохраняет offset. Сокращает время первичной загрузки в ~4 раза |
+
+### Стабильность UI
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `ui._is_thread_alive(thread)` | `isRunning()` в `try/except RuntimeError`: shiboken может отдать удалённый C++ объект, на котором падал 100-мс таймер `_process_result_queue` (CRITICAL-шторм десятков traceback'ов). Мёртвые потоки вычищаются из `self._active_threads` |
+| `MainWindow._loading_paths: set[str]` | Guard «папка уже грузится» в `_fetch_folder_list` — защита от двойного запуска `ApiListThread` для одного пути (PLANS 2.16) |
+| Навигация таблица ↔ дерево | `_sync_tree_to_path` / `_load_folder_local` получили параметр `nav_gen` (generation-токен); `_nav_op_done(gen, op)` отбрасывает устаревшие колбэки — при быстрых переходах выделение не прыгает (PLANS 1.2) |
+
+### Файловые операции
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `ui_shared.is_file_locked_error(exc)` | Детектит `PermissionError [Errno 13]`, `OSError(errno=13)` и маркеры Windows («being used by another process» / «Отказано в доступе») |
+| Статус `locked` | Добавлен в `_VALID_STATUSES` (`db.py`); `db.set_locked(cloud_path, local_path)` сохраняет `local_path`, чтобы повторить попытку после закрытия редактора |
+| `DownloadWorker.locked` / `UploadWorker.locked` | Новые сигналы → `ui._on_file_locked()`: освобождает слот очереди, обновляет таблицу/дерево, статус-бар `🔒 имя — открыт в другой программе…` на 10 с; иконка `Assets/close-ellipse-red.svg` |
+
+### Настройки и обновления
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `SettingsDialog.accept()/reject()/closeEvent()` | Guard `_closing` + отключение `currentIndexChanged` от комбобокса тем — предотвращает STATUS_HEAP_CORRUPTION (0xc0000374), когда отложенный `QTimer.singleShot(0, parent._apply_theme)` срабатывал во время destroy-цепочки после быстрого «OK» |
+| Меню «Справка» | Пункт «Проверить обновления…» (иконка `refresh.svg`), тот же обработчик, что и в трее; при проверке — спиннер и «Проверка обновлений…» в статус-баре, кнопка дизейблится |
+| «О программе» | Кликабельная ссылка на GitHub `https://github.com/KiM38RuS/yadisk-manager` |
+
+### Логирование
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `l10n.py` (v0.12.0) | Локализация лога: `LogTranslatingFormatter` переводит шаблон **до** подстановки аргументов (~230 шаблонов), язык в конфиге `log_lang` (`db.get_log_language()` / `set_log_language()`), `"en"` — оригинал. Работает в окне лога, в `yadisk.log` и в консоли |
 
 ---
 

@@ -256,18 +256,29 @@ class AllFilesThread(QThread):
     """Фоновый поток: загрузка ВСЕХ файлов с Диска постранично с сохранением прогресса.
 
     Фичи:
-    - Постраничная загрузка (по 200 файлов)
+    - Постраничная загрузка (по 500 файлов — лимит API)
     - Сохранение offset в config.json после каждой страницы
     - Авто-ретрай при обрыве (до 5 попыток, 3 сек пауза)
     - Докачка после перезапуска программы
     - Прогресс в статус-бар (через signal)
+    - Параллельная загрузка страниц через ThreadPoolExecutor (PLANS.md 2.1):
+      конкурентные запросы к API ускоряют первичную загрузку в N раз, не
+      блокируя UI. Пул соединений (POOL_SIZE=30) держит одновременные
+      соединения, главный поток не страдает.
     """
     finished = Signal(int)        # всего загружено файлов (счётчик), 0 = неудача
     progress = Signal(int, int)   # offset, текущее количество
 
-    PAGE_LIMIT = 200
+    # 500 — баланс между размером ответа API (limit поддерживается до 1000)
+    # и временем парсинга JSON / записи в БД. С параллельной загрузкой
+    # (CONCURRENT_PAGES) общее число запросов сокращается ещё в N раз.
+    PAGE_LIMIT = 500
     MAX_RETRIES = 5
     RETRY_DELAY_MS = 3000
+    # Сколько страниц запрашивать параллельно (через ThreadPoolExecutor).
+    # 4 — умеренное значение: API-лимит 40 req/sec × 4 воркера = 10 страниц/сек,
+    # БД-батч справляется, пул из 30 коннектов имеет запас.
+    CONCURRENT_PAGES = 4
 
     def __init__(self, api, database, parent=None):
         super().__init__(parent)
@@ -286,6 +297,13 @@ class AllFilesThread(QThread):
 
         logger.info("AllFilesThread: loading all files (resume offset=%d)...", offset)
 
+        # Параллельная загрузка страниц через ThreadPoolExecutor.
+        # На каждой итерации запрашиваем CONCURRENT_PAGES страниц одновременно,
+        # ждём их завершения (в порядке offset'ов), пишем в БД, переходим дальше.
+        # Это сокращает время загрузки в ~CONCURRENT_PAGES раз для больших
+        # дисков (100K+ файлов), не блокируя UI.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         while True:
             if self._stop_requested:
                 logger.info("AllFilesThread: stop requested")
@@ -293,43 +311,73 @@ class AllFilesThread(QThread):
                 self.finished.emit(loaded)
                 return
 
+            # Собираем пачку offset'ов для параллельной загрузки
+            batch_offsets = list(range(
+                offset,
+                offset + self.PAGE_LIMIT * self.CONCURRENT_PAGES,
+                self.PAGE_LIMIT,
+            ))
+
+            def fetch_page(off):
+                return off, self._api.get_all_files_page(self.PAGE_LIMIT, off)
+
             try:
-                page = self._api.get_all_files_page(self.PAGE_LIMIT, offset)
+                with ThreadPoolExecutor(max_workers=self.CONCURRENT_PAGES) as ex:
+                    # submit в порядке offset, чтобы можно было прерваться
+                    # как только встретится пустая страница.
+                    futures = {ex.submit(fetch_page, off): off
+                               for off in batch_offsets}
+                    results = []
+                    for fut in as_completed(futures):
+                        if self._stop_requested:
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            db.set_all_files_offset(offset)
+                            self.finished.emit(loaded)
+                            return
+                        off, page = fut.result()
+                        results.append((off, page))
             except Exception as e:
                 retries += 1
                 logger.error(
                     "AllFilesThread: error at offset=%d (retry %d/%d): %s",
                     offset, retries, self.MAX_RETRIES, e,
                 )
-                # Сохраняем прогресс
                 db.set_all_files_offset(offset)
-
                 if retries >= self.MAX_RETRIES:
                     logger.error("AllFilesThread: max retries exceeded")
                     self.finished.emit(loaded)
                     return
-
-                # Ждём перед повтором (в фоновом потоке — не блокирует GUI)
                 self.msleep(self.RETRY_DELAY_MS)
-                continue  # повтор с тем же offset
+                continue
 
-            # Пустая страница = конец списка
-            if not page:
+            # Сортируем результаты по offset (as_completed не гарантирует порядок)
+            results.sort(key=lambda x: x[0])
+
+            # Обрабатываем страницы по порядку — при пустой странице останавливаемся
+            any_inserted = False
+            for off, page in results:
+                if not page:
+                    # Пустая страница = конец списка
+                    db.set_all_files_offset(0)
+                    logger.info("AllFilesThread: %d files loaded", loaded)
+                    self.finished.emit(loaded)
+                    return
+                # Сохраняем в БД
+                try:
+                    self._database.upsert_files_batch(page)
+                except Exception as e:
+                    logger.error("AllFilesThread: DB insert failed: %s", e)
+                    self.finished.emit(loaded)
+                    return
+                loaded += len(page)
+                any_inserted = True
+
+            if not any_inserted:
+                # На случай, если все страницы пустые (не должно быть, но защита)
                 break
 
-            # Сохраняем в БД
-            try:
-                self._database.upsert_files_batch(page)
-            except Exception as e:
-                logger.error("AllFilesThread: DB insert failed: %s", e)
-                self.finished.emit(loaded)
-                return
-
-            loaded += len(page)
-            offset += self.PAGE_LIMIT
-            retries = 0  # удачный запрос сбрасывает счётчик ретраев
-
-            # Сохраняем прогресс
+            offset += self.PAGE_LIMIT * self.CONCURRENT_PAGES
+            retries = 0
             db.set_all_files_offset(offset)
             self.progress.emit(offset, loaded)
 

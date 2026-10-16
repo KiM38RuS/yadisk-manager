@@ -10,16 +10,26 @@ from datetime import datetime
 from PySide6.QtCore import QObject, Signal
 
 import disk_api
+from ui_shared import is_file_locked_error
 
 logger = logging.getLogger("ui.workers")
 
 
 class DownloadWorker(QObject):
-    """Скачивает файл из облака в фоновом потоке с отчётом прогресса."""
+    """Скачивает файл из облака в фоновом потоке с отчётом прогресса.
+
+    Сигнал finished раздваивается по типу завершения:
+      - finished(local_path) — успех
+      - error(error_msg)     — обычная ошибка (сеть, диск переполнен, ...)
+      - locked(local_path)   — файл заблокирован (открыт в редакторе);
+                                UI помечает его иконкой close-ellipse-red.svg
+                                и подсказкой «закройте файл в редакторе».
+    """
     progress = Signal(int, int)    # downloaded, total
     finished = Signal(str)         # local_path
     error = Signal(str)
     conflict = Signal(str, str)    # cloud_path, local_path
+    locked = Signal(str)           # local_path (файл занят другим процессом)
 
     def __init__(self, api: disk_api.YaDiskAPI,
                  cloud_path: str, local_path: str,
@@ -73,6 +83,15 @@ class DownloadWorker(QObject):
         except Exception as e:
             logger.error("DLW: EXCEPTION: %s", e, exc_info=True)
             self._remove_partial()
+            if is_file_locked_error(e):
+                # Файл занят другим процессом (открыт в редакторе).
+                # Не считаем это «битой» загрузкой — статус 'locked' с
+                # иконкой close-ellipse-red.svg, повторная попытка возможна
+                # позже (когда пользователь закроет файл).
+                logger.info("DLW: file is locked by another process: %s",
+                            self.local_path)
+                self.locked.emit(self.local_path)
+                return
             self.error.emit(str(e))
 
     def _remove_partial(self):
@@ -85,11 +104,20 @@ class DownloadWorker(QObject):
 
 
 class UploadWorker(QObject):
-    """Загружает файл в облако в фоновом потоке с отчётом прогресса."""
+    """Загружает файл в облако в фоновом потоке с отчётом прогресса.
+
+    Сигналы:
+      - finished(cloud_path)   — успех
+      - error(error_msg)       — обычная ошибка
+      - locked(cloud_path)     — файл открыт в редакторе и не может быть
+                                  прочитан/перезаписан; UI пометит его
+                                  иконкой close-ellipse-red.svg.
+    """
     progress = Signal(int, int)    # uploaded, total
     finished = Signal(str)         # cloud_path
     error = Signal(str)
     conflict = Signal(str, str, str)  # cloud_path, local_md5, cloud_md5
+    locked = Signal(str)           # cloud_path
 
     def __init__(self, api: disk_api.YaDiskAPI,
                  local_path: str, cloud_path: str):
@@ -122,6 +150,13 @@ class UploadWorker(QObject):
                 except Exception as e2:
                     self.error.emit(str(e2))
                     return
+            # Файл открыт в редакторе — отдельный сигнал, UI поставит
+            # статус 'locked' (иконка close-ellipse-red.svg).
+            if is_file_locked_error(e):
+                logger.info("UploadWorker: file is locked by another process: "
+                            "%s", self.local_path)
+                self.locked.emit(self.cloud_path)
+                return
             self.error.emit(err_str)
 
     def _do_put(self, href: str):

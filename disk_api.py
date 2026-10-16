@@ -6,6 +6,7 @@ Yandex Disk REST API client.
 import os
 import time
 import logging
+import threading
 from typing import Optional
 from collections import deque
 from urllib.parse import quote
@@ -66,12 +67,62 @@ def _error_message(resp) -> str:
         return resp.text
 
 
+# Размер пула для ВСЕХ requests.Session в проекте.
+# 30 — чтобы 35+ одновременных скачиваний не блокировались стандартным 1.
+# См. PLANS.md 2.15: голые requests.get() в updater.py и net_heal.DoHResolver
+# создавали дефолтную сессию с maxsize=1 — каждое обращение к GitHub/DoH
+# лог-засоряло 'Connection pool is full, discarding connection'.
+POOL_SIZE = 30
+
+_shared_session: requests.Session | None = None
+_shared_session_lock = threading.Lock()
+
+
+def get_shared_session() -> requests.Session:
+    """Общая requests.Session для модулей проекта (updater, net_heal и т.п.).
+
+    Возвращает сессию с HTTPAdapter(pool_connections=POOL_SIZE,
+    pool_maxsize=POOL_SIZE), смонтированным на http:// и https://. Это решает
+    проблему 'Connection pool size: 1' для всех клиентов, которые раньше
+    использовали голые requests.get() (каждый вызов = новая сессия
+    с дефолтным пулом 1).
+
+    Не использовать для обращений к cloud-api.yandex.net — для этого есть
+    YaDiskAPI, который монтирует HealedAdapter и применяет NetHeal-обход
+    блокировок. Здесь — общий пул для прочих хостов.
+    """
+    global _shared_session
+    if _shared_session is not None:
+        return _shared_session
+    with _shared_session_lock:
+        if _shared_session is not None:
+            return _shared_session
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=POOL_SIZE, pool_maxsize=POOL_SIZE)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _shared_session = session
+        return session
+
+
 class YaDiskAPI:
-    """Тонкая обёртка над REST API Яндекс.Диска."""
+    """Тонкая обёртка над REST API Яндекс.Диска.
+
+    Использует общую сессию с пулом соединений POOL_SIZE=30
+    (см. get_shared_session), чтобы избежать предупреждений
+    'Connection pool is full, discarding connection:
+    cloud-api.yandex.net. Connection pool size: 1' при высокой нагрузке.
+    Документация: https://yandex.ru/dev/disk/rest/
+    """
 
     def __init__(self, token: str, net_heal_enabled_fn=None):
         self.token = token
-        self._session = requests.Session()
+        # Используем общую сессию с пулом соединений POOL_SIZE=30,
+        # вместо создания новой Session с дефолтным пулом size=1.
+        # Это фикс для предупреждений "Connection pool is full, discarding
+        # connection: cloud-api.yandex.net. Connection pool size: 1" в логе.
+        self._session = get_shared_session()
         # Увеличиваем пул соединений — 35+ одновременных скачиваний не должны
         # блокироваться стандартным pool_connections=10
         if net_heal_enabled_fn is not None:

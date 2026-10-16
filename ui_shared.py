@@ -36,6 +36,7 @@ STATUS_LABELS = {
     "unknown": "неизвестно",
     "partial": "частично на компьютере",
     "deleting": "удаление",
+    "locked": "заблокирован",
 }
 STATUS_ICON = {
     "cloud_only": "cloud.svg",
@@ -44,6 +45,7 @@ STATUS_ICON = {
     "unknown": "synchronize-light-update.svg",
     "partial": "loaded-partically.svg",
     "deleting": "trash.svg",
+    "locked": "close-ellipse-red.svg",
 }
 STATUS_COLOR = {
     "cloud_only": QColor("#999"),
@@ -51,6 +53,7 @@ STATUS_COLOR = {
     "syncing": QColor("#08f"),
     "unknown": QColor("#888"),
     "deleting": QColor("#c44"),
+    "locked": QColor("#C0392B"),
 }
 STATUS_COLOR_LIGHT = {
     "cloud_only": QColor("#999"),
@@ -58,6 +61,7 @@ STATUS_COLOR_LIGHT = {
     "syncing": QColor("#0078D4"),
     "unknown": QColor("#666"),
     "deleting": QColor("#C00"),
+    "locked": QColor("#C0392B"),
 }
 
 WINDOWS_RESERVED = frozenset(
@@ -160,6 +164,40 @@ def _svg_icon(name: str, size: int = 36) -> QIcon:
 def _clear_svg_icon_cache() -> None:
     """Очистить кеш иконок (вызывать при смене темы)."""
     _svg_icon_cache.clear()
+
+
+# ── определение «файл заблокирован» (открыт в редакторе) ───
+
+# Подстроки сообщений ОС при попытке открыть/перезаписать занятый файл.
+# На Windows это «being used by another process» / «Отказано в доступе»,
+# на macOS/Linux — «Resource temporarily unavailable» / «Permission denied».
+_LOCKED_FILE_HINTS = (
+    "being used by another process",
+    "отказано в доступе",
+    "permission denied",
+    "resource temporarily unavailable",
+    "the process cannot access the file",
+)
+
+
+def is_file_locked_error(exc: BaseException) -> bool:
+    """True, если исключение похоже на занятость файла другой программой.
+
+    Используется DownloadWorker/UploadWorker, чтобы корректно пометить
+    файл в БД статусом 'locked' — иконка close-ellipse-red.svg в
+    таблице/дереве вместо креша в логе.
+    """
+    if not isinstance(exc, PermissionError) and not isinstance(exc, OSError):
+        return False
+    # PermissionError всегда считаем занятостью (errno 13) — это и есть
+    # типичный случай «Excel/LibreOffice открыл файл».
+    if isinstance(exc, PermissionError):
+        return True
+    # OSError с errno 13 на не-Windows платформах — тоже занятость.
+    if getattr(exc, "errno", None) in (13,):
+        return True
+    msg = str(exc).lower()
+    return any(h in msg for h in _LOCKED_FILE_HINTS)
 
 
 _svg_icon_cache: dict = {}

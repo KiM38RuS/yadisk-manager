@@ -24,6 +24,8 @@ import tempfile
 import requests
 from PySide6.QtCore import QThread, Signal
 
+from disk_api import get_shared_session
+
 logger = logging.getLogger(__name__)
 
 # ── Настройки ─────────────────────────────────────────────
@@ -100,8 +102,8 @@ def fetch_latest_release(repo: str, timeout: float = UPDATE_TIMEOUT_S,
     else:
         url = RELEASE_URL.format(repo=repo)
     try:
-        r = requests.get(url, headers={"User-Agent": UA.format(repo=repo)},
-                         timeout=timeout)
+        r = get_shared_session().get(
+            url, headers={"User-Agent": UA.format(repo=repo)}, timeout=timeout)
     except requests.RequestException as e:
         logger.info("Update check failed (network): %s", e)
         return None
@@ -177,8 +179,9 @@ def download_update(info: UpdateInfo, dest: str | None = None,
     logger.info("Downloading %s → %s", info.download_url, dest)
     tmp = dest + ".part"
     try:
-        with requests.get(info.download_url, stream=True, timeout=60,
-                          headers={"User-Agent": UA.format(repo=info.repo)}) as r:
+        session = get_shared_session()
+        with session.get(info.download_url, stream=True, timeout=60,
+                         headers={"User-Agent": UA.format(repo=info.repo)}) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0) or 0)
             done = 0
