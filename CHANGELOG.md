@@ -5,7 +5,7 @@
 - **Исправлено**: спам в лог `urllib3 ... Connection pool is full, discarding connection: cloud-api.yandex.net. Connection pool size: 1` (до 5566 строк за сессию) — PLANS 2.15:
   - Настоящая причина: `HealedAdapter.init_poolmanager` прокидывал аргументы requests позиционно в `PoolManager(num_pools, headers, **kw)` — `pool_maxsize` уезжал в `headers`, а `maxsize` терялся, и пул создавался с дефолтом urllib3 `maxsize=1`
   - Фикс v0.12.2 (`get_shared_session`) на heal-ветку не действовал — `HealedAdapter` создаёт пул сам
-  - Теперь `maxsize=POOL_SIZE` (30) доходит до пула: явная сигнатура `HealedAdapter.init_poolmanager`
+  - Теперь `maxsize=POOL_SIZE` (30) доходит до пула: сигнатура `HealedAdapter.init_poolmanager` сделана явной (`connections, maxsize, block=False, **pool_kwargs`), как в `requests.adapters.HTTPAdapter`
 - **Исправлено (безопасность)**: OAuth-токен Яндекса больше не уходит на api.github.com — `YaDiskAPI` использует собственную `requests.Session` вместо общей процессной; `get_shared_session()` осталась для `updater` (PLANS 2.17)
 - **Тесты**: регресс-тесты реального размера пула (`tests/test_net_heal.py`) и изоляции сессий `TestYaDiskApiSessionIsolation` (`tests/test_shared_session.py`)
 
@@ -19,7 +19,7 @@
 - **Исправлено (критическое)**: CRITICAL-шторм «Internal C++ object already deleted» в `_process_result_queue` — PLANS 2.14:
   - `SyncThread`/любой `QThread` после `cancel()` + GC становился удалённым C++ объектом, а ссылка оставалась в `self._active_threads`; 100-мс таймер каждую секунду падал с `RuntimeError` на `t.isRunning()` (в логе — десятки CRITICAL-блоков подряд)
   - фикс: `ui.py: _is_thread_alive()` — `isRunning()` в `try/except RuntimeError`, мёртвые потоки вычищаются из списка
-- **Исправлено**: шторм «Connection pool is full, discarding connection» (200+ предупреждений за сессию) — PLANS 2.15:
+- **Исправлено**: шторм «Connection pool is full, discarding connection» (200+ предупреждений за сессию) — PLANS 2.15 — на heal-ветке не сработало: `HealedAdapter` терял `maxsize`, пул оставался = 1; настоящая причина закрыта в v0.12.3 (см. выше):
   - `disk_api.get_shared_session()` — общий singleton `requests.Session` с `HTTPAdapter(pool_connections=30, pool_maxsize=30)`, смонтированный на `http://` и `https://`
   - `YaDiskAPI`, `updater.fetch_latest_release`/`download_update` переведены на эту сессию; раньше `requests.get()` создавал дефолтную сессию с `maxsize=1`
   - `net_heal.DoHResolver` — своя сессия с пулом 10 (нужен `HealedAdapter`, чтобы не было рекурсии при обходе блокировок)

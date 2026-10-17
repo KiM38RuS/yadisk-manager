@@ -1,7 +1,7 @@
 # ☁️ YaDisk Manager — Дизайн-документ
 
-> Версия: 0.12.2
-> Дата: 2026-10-16
+> Версия: 0.12.3
+> Дата: 2026-10-17
 > Цель: создать рабочую копию программы «Яндекс Диск» 3.0 для ПК, не требующую подписки Яндекс 360
 
 ---
@@ -611,13 +611,24 @@ D:\Program_Files\YaDiskManager\
 
 ---
 
+## Изменения v0.12.2 — v0.12.3
+
+### Сеть и безопасность
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `net_heal.HealedAdapter.init_poolmanager` | Сигнатура сделана явной (`connections, maxsize, block=False, **pool_kwargs`), как в `requests.adapters.HTTPAdapter`. Раньше аргументы requests уходили позиционно в `PoolManager(num_pools, headers, **kw)`: `pool_maxsize` попадал в `headers`, а `maxsize` терялся — пул собирался с дефолтом urllib3 `maxsize=1`, и в лог шёл шторм «Connection pool is full» (5566 строк за сессию, PLANS 2.15). Теперь `maxsize=POOL_SIZE` (30) доходит до пула |
+| `disk_api.YaDiskAPI` | Переведён на собственную `requests.Session` (свой `HealedAdapter`, `POOL_SIZE` = 30): OAuth-токен Яндекса больше не попадает в общую `get_shared_session()`, которую `updater` использует для `api.github.com` (PLANS 2.17). `get_shared_session()` осталась для `updater` |
+
+---
+
 ## Изменения v0.12.1 — v0.12.2
 
 ### Сеть и производительность
 
 | Компонент | Что изменилось |
 |----------|----------------|
-| `disk_api.get_shared_session()` | Новый singleton: общий `requests.Session` с `HTTPAdapter(pool_connections=30, pool_maxsize=30)`, смонтированным на `http://` и `https://`. Раньше каждое голое `requests.get()` создавало сессию с дефолтным `maxsize=1` → шторм «Connection pool is full, discarding connection» при параллельных воркерах. На общую сессию переведены `YaDiskAPI`, `updater.fetch_latest_release`, `updater.download_update` |
+| `disk_api.get_shared_session()` | Новый singleton: общий `requests.Session` с `HTTPAdapter(pool_connections=30, pool_maxsize=30)`, смонтированным на `http://` и `https://`. Раньше каждое голое `requests.get()` создавало сессию с дефолтным `maxsize=1` → шторм «Connection pool is full, discarding connection» при параллельных воркерах. Исторические потребители: `YaDiskAPI` (до v0.12.3), `updater.fetch_latest_release`, `updater.download_update`; с v0.12.3 `YaDiskAPI` использует собственную `requests.Session` (`Authorization` больше не уходит на `api.github.com` — PLANS 2.17) |
 | `net_heal.DoHResolver` | Своя сессия с пулом 10 (не `get_shared_session()` — нужен `HealedAdapter`, иначе рекурсия при обходе блокировок) |
 | `ui_threads.AllFilesThread` | `PAGE_LIMIT` 200 → 500; параллельная загрузка страниц через `ThreadPoolExecutor(max_workers=CONCURRENT_PAGES=4)`: пачка offset'ов запрашивается одновременно, результаты сортируются по offset и пишутся в БД по порядку; `request_stop` прерывает пачку через `cancel_futures` и сохраняет offset. Сокращает время первичной загрузки в ~4 раза |
 
