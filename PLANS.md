@@ -141,7 +141,7 @@
 | Исправлен STATUS_HEAP_CORRUPTION (0xc0000374) при быстром клике «OK» в настройках после смены темы — guard `_closing` в `SettingsDialog.accept()/reject()/closeEvent()` | v0.12.2 |
 | Ускорение стартовой загрузки: `PAGE_LIMIT` 500 + параллельные страницы через `ThreadPoolExecutor` (PLANS 2.1) | v0.12.2 |
 | CRITICAL-шторм «Internal C++ object already deleted» — `_is_thread_alive()` (PLANS 2.14) | v0.12.2 |
-| Шторм «Connection pool is full» — общий `requests.Session` с пулом 30 (PLANS 2.15) | v0.12.2 |
+| Шторм «Connection pool is full» — общий `requests.Session` с пулом 30 (PLANS 2.15) — на heal-ветке не сработало: пул оставался = 1, баг закрыт только в v0.12.3 (см. 2.15 и запись выше) | v0.12.2 |
 | Двойной запуск `ApiListThread` для одной папки — guard `_loading_paths` (PLANS 2.16) | v0.12.2 |
 | Гонка навигации «таблица ↔ дерево» — generation-токен `nav_gen` (PLANS 1.2) | v0.12.2 |
 | Локализация лога — русский язык для окна лога, `yadisk.log` и консоли (`l10n.py`: ~230 шаблонов, перевод до подстановки аргументов; язык в конфиге `log_lang`; `LOG_LOCALIZATION.md` — как добавить язык; `UI_LOCALIZATION.md` — оценка локализации интерфейса; `tests/test_l10n.py`) | v0.12.0 |
