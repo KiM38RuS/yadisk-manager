@@ -69,8 +69,9 @@
 | 2.12 | **Разделители колонок** — столбец «Размер» заблокирован; последний столбец без правой границы | 🔵 | Баг |
 | 2.13 | **Перетаскивание колонок** — `setSectionsMovable(True)` + сохранение порядка | 🔵 | Новая |
 | 2.14 | **CRITICAL-шторм `SyncThread already deleted` в `_process_result_queue`** — `t.isRunning()` падает с `RuntimeError` для удалённого C++ объекта; ссылка остаётся в `self._active_threads` после `SyncThread.cancel()`/`quit()`, и 100-мс таймер каждую секунду роняет traceback | 🔴 | ✅ **Готово** (v0.12.2: `ui.py: _is_thread_alive()` — `try/except RuntimeError`, мёртвые потоки вычищаются; `tests/test_thread_alive.py`) |
-| 2.15 | **Connection pool is full, discarding connection** — `requests.Session` с дефолтным пулом = 1 коннект на хост, при параллельных воркерах urllib3 отбрасывал новые коннекты (свыше 200 предупреждений за сессию) | 🔴 | ✅ **Готово** (v0.12.2: `disk_api.get_shared_session()` — singleton с `HTTPAdapter(pool_connections=30, pool_maxsize=30)`; на неё переведены `YaDiskAPI`, `updater`, DoHResolver — своя сессия с пулом 10; `tests/test_shared_session.py`) |
+| 2.15 | **Connection pool is full, discarding connection** — до 5566 строк `urllib3 ... Connection pool size: 1` за сессию; фикс v0.12.2 (`get_shared_session`) НЕ сработал на heal-ветку: `HealedAdapter.init_poolmanager` прокидывал аргументы requests позиционно в `PoolManager(num_pools, headers, **kw)` — `pool_maxsize` уезжал в `headers`, `maxsize` терялся, пул создавался с дефолтом urllib3 `maxsize=1` | 🔴 | ✅ **Готово** (v0.12.3: явная сигнатура `HealedAdapter.init_poolmanager` → `maxsize=POOL_SIZE` (30) доходит до пула; регресс-тесты реального размера пула в `tests/test_net_heal.py`) |
 | 2.16 | **Двойной запуск `ApiListThread` для одной папки** — `/Документы` стартовала дважды за 30 мс, второй поток перетирал результат первого | 🟡 | ✅ **Готово** (v0.12.2: `MainWindow._loading_paths: set[str]` — guard в `_fetch_folder_list`; `tests/test_loading_paths_guard.py`) |
+| 2.17 | **Утечка OAuth-токена Яндекса на api.github.com** — `YaDiskAPI` использовал общую процессную `get_shared_session()` из `updater` и вешал `Authorization: OAuth <token>` на неё; токен улетал в запросах к GitHub Releases | 🔴 | ✅ **Готово** (v0.12.3: `YaDiskAPI` на собственной `requests.Session`; `Authorization` не попадает в `get_shared_session()`; `TestYaDiskApiSessionIsolation` в `tests/test_shared_session.py`) |
 
 #### 3. Watchdog и синхронизация (непрерывная двусторонняя)
 
@@ -133,6 +134,8 @@
 
 | Задача | Версия |
 |--------|--------|
+| Шторм «Connection pool is full» — настоящая причина: `HealedAdapter` терял `maxsize` (пул = 1); явная сигнатура `init_poolmanager` → пул 30 (PLANS 2.15) | v0.12.3 |
+| Утечка OAuth-токена Яндекса на api.github.com — `YaDiskAPI` на собственной сессии, не общей с `updater` (PLANS 2.17) | v0.12.3 |
 | Обработка «файл заблокирован» (PermissionError → статус `locked`, иконка `close-ellipse-red.svg`, ретрай после закрытия редактора) | v0.12.1 |
 | Ссылка на GitHub в «О программе», пункт «Проверить обновления…» в меню «Справка», спиннер при проверке | v0.12.1 |
 | Исправлен STATUS_HEAP_CORRUPTION (0xc0000374) при быстром клике «OK» в настройках после смены темы — guard `_closing` в `SettingsDialog.accept()/reject()/closeEvent()` | v0.12.2 |

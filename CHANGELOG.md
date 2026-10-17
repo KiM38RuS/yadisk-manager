@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.3 (2026-10-17)
+
+- **Исправлено**: спам в лог `urllib3 ... Connection pool is full, discarding connection: cloud-api.yandex.net. Connection pool size: 1` (до 5566 строк за сессию) — PLANS 2.15:
+  - Настоящая причина: `HealedAdapter.init_poolmanager` прокидывал аргументы requests позиционно в `PoolManager(num_pools, headers, **kw)` — `pool_maxsize` уезжал в `headers`, а `maxsize` терялся, и пул создавался с дефолтом urllib3 `maxsize=1`
+  - Фикс v0.12.2 (`get_shared_session`) на heal-ветку не действовал — `HealedAdapter` создаёт пул сам
+  - Теперь `maxsize=POOL_SIZE` (30) доходит до пула: явная сигнатура `HealedAdapter.init_poolmanager`
+- **Исправлено (безопасность)**: OAuth-токен Яндекса больше не уходит на api.github.com — `YaDiskAPI` использует собственную `requests.Session` вместо общей процессной; `get_shared_session()` осталась для `updater` (PLANS 2.17)
+- **Тесты**: регресс-тесты реального размера пула (`tests/test_net_heal.py`) и изоляции сессий `TestYaDiskApiSessionIsolation` (`tests/test_shared_session.py`)
+
 ## v0.12.2 (2026-10-16)
 
 - **Улучшено (критично)**: стартовая загрузка всего содержимого Диска стала в разы быстрее (`ui_threads.py`, `AllFilesThread`) — PLANS 2.1:
