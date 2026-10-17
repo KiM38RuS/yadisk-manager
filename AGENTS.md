@@ -113,12 +113,28 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 ### 🔄 Обновления (updater.py)
 
 - **Перед релизом** заполнить `UPDATE_REPO = "username/repo"` в `updater.py` (пока пусто — проверка отключена).
-- Релиз на GitHub: тег `v0.11.x` + ассеты `YaDiskManager.exe` (обязательно) и `Setup_YaDiskManager_v*.exe` (инсталлер, опционально). Апдейтер ищет ассет с именем, оканчивающимся на `.exe` и не содержащим `setup`.
+- Релиз на GitHub: тег `v{ver}` + ассеты по правилу имён (см. «📦 Имена ассетов релиза»): `YaDiskManager_v{ver}_portable.exe` (обязательно) и `YaDiskManager_v{ver}_setup.exe` (инсталлер, опционально). Апдейтер ищет первый ассет, оканчивающийся на `.exe` и **не содержащий** `setup`.
 - Обновление применяется только в frozen-режиме (exe): скачивание в `YaDiskManager.new.exe` рядом с текущим, скрытый `apply_update.bat` ждёт выхода приложения, переименовывает и запускает новый exe. В dev-режиме — только скачивание в temp.
 - Авто-проверка: через 20 сек после старта и каждые 4 часа; уведомление в трее; настройка в Настройках (по умолчанию вкл.).
 - **Все релизы выпускаются как pre-release** (пользователь не хочет «сырые» версии под видом обычного релиза).
 - **Галочка «Обновляться до бета-версий» включена по умолчанию** (`db.py: get_update_beta_enabled()` → `load_config().get("update_beta_enabled", True)`): GitHub `/releases/latest` НЕ отдаёт pre-release (404, если нет обычных релизов), поэтому апдейтер должен всегда ходить в `/releases?per_page=10` и брать свежую не-draft запись.
 - **Перед релизом с pre-release** проверить, что `update_beta_enabled` по умолчанию `True` (иначе пользователи без галочки не увидят обновление). При выпуске обычного (stable) релиза — вернуть дефолт `False`.
+
+### 📦 Имена ассетов релиза
+
+Единый формат для **всех** релизов и pre-release — имя содержит версию и тип сборки:
+
+| Тип | Шаблон имени | Пример (v0.12.2) | Обязателен |
+|---|---|---|---|
+| Портативная версия (onefile exe) | `YaDiskManager_v{ver}_portable.exe` | `YaDiskManager_v0.12.2_portable.exe` | **Да** |
+| Установщик (Inno Setup) | `YaDiskManager_v{ver}_setup.exe` | `YaDiskManager_v0.12.2_setup.exe` | Опционально |
+
+Правила:
+- `{ver}` — версия **без** префикса `v`, совпадает с `_version.py` (например, `0.12.2`).
+- **Портативный** ассет обязателен и **не должен содержать `setup`** в имени: апдейтер берёт первый ассет, оканчивающийся на `.exe` и не содержащий `setup` (`updater.py: find_update`).
+- **Установщик** обязан содержать `setup` в имени — иначе апдейтер по ошибке скачает инсталлер вместо портативного exe и «обновит» им приложение.
+- Эти шаблоны нельзя менять без правки `updater.find_update()` — от них зависит авто-обновление.
+- Чтобы Inno Setup выдавал нужное имя, в `installer.iss` задать `OutputBaseFilename=YaDiskManager_v{#MyAppVersion}_setup` (по умолчанию сейчас `Setup_YaDiskManager_v{#MyAppVersion}`).
 
 ### 📋 Цикл релиза (чек-лист)
 
@@ -132,10 +148,10 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 | 4 | **Обновить DESIGN.md** | Отразить архитектурные изменения (новые методы, компоненты, связи) |
 | 5 | **Скопировать бэкап** | `Backup/{old_ver}/` → `Backup/{new_ver}/` (все `.py` + `requirements.txt`); после правок кода — обновить бэкап повторно |
 | 6 | **Собрать exe** | `build_exe.bat` (IPC выставится автоматически) |
-| 7 | **Собрать инсталлер** | `"D:\Program_files\InnoSetup\ISCC.exe" installer.iss /DMyAppVersion={ver}` → `dist\Setup_YaDiskManager_v{ver}.exe` |
+| 7 | **Собрать инсталлер** | `"D:\Program_files\InnoSetup\ISCC.exe" installer.iss /DMyAppVersion={ver}` → `dist\YaDiskManager_v{ver}_setup.exe` (при заданном `OutputBaseFilename`, см. «📦 Имена ассетов релиза») |
 | 8 | **Git commit + push** | `git add` (`.py`, `.md`, `Backup/`), `git commit`, `git push origin main` |
 | 9 | **Git tag** | `git tag v{ver}`, `git push origin v{ver}` |
-| 10 | **Создать релиз на GitHub** | GitHub → Releases → Draft new release → выбрать тег, загрузить `YaDiskManager.exe` + `Setup_*.exe` |
+| 10 | **Создать релиз на GitHub** | GitHub → Releases → Draft new release → выбрать тег, загрузить `YaDiskManager_v{ver}_portable.exe` + `YaDiskManager_v{ver}_setup.exe` (см. «📦 Имена ассетов релиза») |
 | 11 | **Переименовать сессию** | Если harness доступен: `hermes sessions rename $ID "YaDiskManager v{ver} [описание]"` |
 
 ### 🏷️ Именование сессий
