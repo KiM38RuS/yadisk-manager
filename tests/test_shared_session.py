@@ -14,6 +14,8 @@ get_shared_session() возвращает singleton с HTTPAdapter(pool_maxsize=
 - при многократном вызове get_shared_session() — НЕ создаются новые адаптеры
 - YaDiskAPI НЕ делит сессию с updater/DoH: OAuth-токен Яндекса остаётся
   в приватной сессии и не уходит на api.github.com
+- тесты не текут глобальным состоянием: `net_heal.STATE` и
+  `disk_api._shared_session` сохраняются до теста и возвращаются после
 """
 import os
 import sys
@@ -29,12 +31,28 @@ import disk_api
 import net_heal
 
 
-class TestGetSharedSession(unittest.TestCase):
+class _SavedGlobalStateCase(unittest.TestCase):
+    """База для тестов, трогающих глобальное состояние модулей.
+
+    `disk_api._shared_session` сбрасывается в `setUp` (иначе тесты зависят
+    от порядка запуска), а конструктор `net_heal.HealedAdapter` внутри
+    `YaDiskAPI` с включённым обходом переписывает модульный `net_heal.STATE`
+    (`enabled_fn`/`cache`/`resolver`). Чтобы это не протекало в соседние
+    тесты, сохраняем оба значения до теста и возвращаем в `tearDown` —
+    тот же приём, что у фикстуры `heal_state` в `tests/test_net_heal.py`.
+    """
+
     def setUp(self):
-        """Сбросить singleton перед каждым тестом (иначе тесты зависят
-        от порядка запуска)."""
+        self._saved_net_heal_state = net_heal.STATE
+        self._saved_shared_session = disk_api._shared_session
         disk_api._shared_session = None
 
+    def tearDown(self):
+        net_heal.STATE = self._saved_net_heal_state
+        disk_api._shared_session = self._saved_shared_session
+
+
+class TestGetSharedSession(_SavedGlobalStateCase):
     def test_returns_session(self):
         s = disk_api.get_shared_session()
         self.assertIsInstance(s, __import__("requests").Session)
@@ -101,7 +119,7 @@ class TestDoHResolverPool(unittest.TestCase):
         self.assertIs(resolver._session, own)
 
 
-class TestYaDiskApiSessionIsolation(unittest.TestCase):
+class TestYaDiskApiSessionIsolation(_SavedGlobalStateCase):
     """YaDiskAPI держит собственную сессию.
 
     Общая сессия (get_shared_session) обслуживает updater (api.github.com) и
@@ -109,10 +127,6 @@ class TestYaDiskApiSessionIsolation(unittest.TestCase):
     токен Яндекса уходит на GitHub. Здесь проверяем, что сессии раздельные,
     а пул приватной сессии при этом не деградировал до urllib3-дефолта 1.
     """
-
-    def setUp(self):
-        """Сбросить singleton, чтобы тесты не зависели от порядка запуска."""
-        disk_api._shared_session = None
 
     def test_api_session_is_not_shared_session(self):
         api = disk_api.YaDiskAPI("tok", net_heal_enabled_fn=lambda: True)
