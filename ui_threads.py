@@ -558,7 +558,10 @@ class StartupScanThread(QThread):
     """Фоновый поток для стартового сканирования: stale, changed, new files + полная обработка."""
     # Сигналы для разных этапов обработки
     progress = Signal(str, int)  # message, count
-    finished = Signal()  # завершение всей обработки
+    # ВНИМАНИЕ: не объявлять `finished = Signal()` — это затеняет встроенный
+    # QThread.finished той же сигнатуры, и слот вызывается ДВАЖДЫ
+    # (явный emit в run() + собственный finished Qt) → двойной _init_watcher
+    # → два наблюдателя. Используем встроенный finished.
     auth_error = Signal(str)  # ошибка авторизации
     network_error = Signal()  # нет интернета
 
@@ -638,8 +641,9 @@ class StartupScanThread(QThread):
         
         # Обрабатываем результаты в этом же потоке (без блокировки UI)
         self._process_results(stale, changed, new_files, new_dirs)
-        
-        self.finished.emit()
+
+        # finished НЕ эмитить вручную: встроенный QThread.finished сработает
+        # сам при выходе из run() (см. комментарий выше к объявлению класса)
 
     def _process_results(self, stale: set, changed: set, new_files: set, new_dirs: set):
         """Обработка результатов сканирования в фоне."""

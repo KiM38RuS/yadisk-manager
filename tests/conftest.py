@@ -33,6 +33,126 @@ collect_ignore = ["test_integration_real_api.py", "test_qt_init.py"]
 # ---- disable real API imports during tests -----------------
 # We patch disk_api before any real import happens
 import disk_api  # noqa: E402
+import db  # noqa: E402
+
+
+# ── Изоляция от реального окружения пользователя ───────────
+
+def _quiet_shutdown_window(window) -> None:
+    """Погасить фоновые потоки окна, не трогая общий QApplication.
+
+    Повторяет хвост `MainWindow._delayed_close`, но без
+    `QApplication.processEvents()` (переиспользовал очередь событий живого
+    окна) и `QApplication.quit()` (убивал QApplication для всех следующих
+    тестов — навигационные тесты после этого висли).
+
+    Зачем: тесты создают настоящий MainWindow и просто закрывают его
+    (`close()` = спрятать в трей). Окно остаётся живым вместе с
+    freeze-monitor'ом, watchdog'ом, таймерами и AllFilesThread. К концу
+    прогона это ~13 окон и ~56 потоков, их QThread'ы доживали до финализации
+    интерпретатора и убивали процесс (0xC0000409) уже после того, как все
+    тесты прошли.
+    """
+    window._freeze_thread_running = False
+    for name in ("_result_timer", "_watcher_timer", "_poll_timer",
+                 "_heartbeat_timer", "_bulk_sync_timer",
+                 "_connectivity_timer", "_update_timer"):
+        timer = getattr(window, name, None)
+        try:
+            timer.stop()
+        except (AttributeError, RuntimeError):
+            pass
+    watcher = getattr(window, "_watcher", None)
+    try:
+        watcher.stop()
+    except (AttributeError, RuntimeError):
+        pass
+    threads = list(getattr(window, "_active_threads", None) or [])
+    for t in threads:
+        # AllFilesThread/StartupScanThread умеют request_stop(); остальные —
+        # QThread.quit() (без запущенного event loop это no-op, поток
+        # завершается сам).
+        stop = getattr(t, "request_stop", None)
+        try:
+            if callable(stop):
+                stop()
+            else:
+                t.quit()
+        except RuntimeError:
+            pass
+    for t in threads:
+        try:
+            t.wait(3000)
+            if t.isRunning():
+                t.terminate()
+                t.wait(500)
+        except RuntimeError:
+            pass
+    try:
+        window._active_threads.clear()
+    except AttributeError:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def isolate_real_app_state(monkeypatch, tmp_path):
+    """Убрать побочные эффекты тестов, поднимающих настоящий MainWindow.
+
+    Три теста создают реальный MainWindow (test_settings_dialog_close,
+    test_nav_selection_sync), который стартует фоновые потоки. Без изоляции
+    они жили до конца прогона и:
+
+      * ходили в сеть (авто-проверка обновлений → api.github.com);
+      * писали в реальный config.json пользователя (all_files_offset,
+        cache_dir, геометрия окна);
+      * поднимали watchdog на реальную кеш-папку;
+      * плодили freeze-monitor потоки: каждый зависал в дампе стеков
+        (раньше — через sys._current_frames()/traceback.format_stack(),
+        что давало нативное падение; теперь — faulthandler в freeze.log)
+        и раздувал вывод сообщениями с частотой 5 Гц.
+
+    Параллельные SSL/requests-потоки приводили к нативному падению процесса
+    ("Windows fatal exception: access violation" в ssl_wrap_socket), из-за
+    чего прогон обрывался на ~70%.
+    """
+    import updater as updater_mod
+    import ui as ui_mod
+
+    # Конфиг — во временный файл (реальные настройки не трогаем).
+    monkeypatch.setattr(db, "CONFIG_PATH", str(tmp_path / "config.json"))
+    # Никакой сети: _start_update_check выходит сразу при пустом UPDATE_REPO.
+    monkeypatch.setattr(updater_mod, "UPDATE_REPO", "")
+    # Дампы зависаний — тоже во временную папку, а не в реальный APPDATA.
+    monkeypatch.setattr(ui_mod, "_freeze_dump_path",
+                        lambda: str(tmp_path / "freeze.log"))
+
+    # Запомнить все созданные окна, чтобы погасить их потоки после теста.
+    created_windows: list = []
+    orig_init = ui_mod.MainWindow.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        created_windows.append(self)
+
+    monkeypatch.setattr(ui_mod.MainWindow, "__init__", _tracking_init)
+
+    # Тяжёлую фоновую загрузку всех файлов (AllFilesThread + ThreadPoolExecutor)
+    # в тестах не запускаем: 27 таких потоков за прогон, и их пул-исполнители
+    # доживали до финализации интерпретатора (Python там падает с
+    # "Fatal Python error: Aborted" / 0xC0000409 в ex.submit). Сам AllFilesThread
+    # проверяется отдельно в test_all_files_thread.py.
+    monkeypatch.setattr(ui_mod.MainWindow, "_start_all_files_load",
+                        lambda self: None)
+    monkeypatch.setattr(ui_mod.MainWindow, "_start_bulk_sync",
+                        lambda self: None)
+
+    yield
+
+    for window in created_windows:
+        try:
+            _quiet_shutdown_window(window)
+        except Exception:
+            pass  # уборка не имеет права уронить тест
 
 
 # ── Mock API ───────────────────────────────────────────────

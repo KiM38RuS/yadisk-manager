@@ -15,6 +15,29 @@ import warnings
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+# ── Crash-диагностика: нативные падения (Qt/segfault) без traceback ──
+# faulthandler ловит фатальные сигналы Windows (0xc0000005 AV,
+# 0xc0000409, STATUS_HEAP_CORRUPTION) и пишет стеки ВСЕХ потоков в
+# crash.log — иначе процесс умирает молча, как v0.12.2 на чужой машине.
+try:
+    _crash_dir = os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")), "yadisk-client"
+    )
+    os.makedirs(_crash_dir, exist_ok=True)
+    _crash_path = os.path.join(_crash_dir, "crash.log")
+    # Простая ротация: один предыдущий crash.log.old (лимит ~1 МБ)
+    try:
+        if os.path.exists(_crash_path) and os.path.getsize(_crash_path) > 1_000_000:
+            os.replace(_crash_path, _crash_path + ".old")
+    except Exception:
+        pass
+    _crash_fh = open(_crash_path, "a", encoding="utf-8", buffering=1)
+    _crash_fh.write(f"\n===== session start {__import__('datetime').datetime.now():%Y-%m-%d %H:%M:%S} pid={os.getpid()} =====\n")
+    import faulthandler
+    faulthandler.enable(file=_crash_fh, all_threads=True)
+except Exception:
+    _crash_fh = None  # crash-диагностика — бонус, не блокируем запуск
+
 from PySide6.QtCore import QTimer, QThread, Signal, qInstallMessageHandler
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QFileDialog,
@@ -71,11 +94,20 @@ def _qt_message_handler(mode, context, message):
     C++-кода Qt (например, из парсера QSS при setStyleSheet). Синхронный
     вход в Qt-виджеты из такого колбэка = реентерабельность →
     segfault / STATUS_HEAP_CORRUPTION.
+
+    Critical/Fatal дополнительно пишем в crash.log обычной записью в файл
+    (без Qt и logging) — в frozen exe stderr теряется, и Qt fatal-причина
+    нативного краша остаётся невидимой (см. crash на v0.12.2).
     """
     # QtMsgType: 0=Debug, 1=Warning, 2=Critical, 3=Fatal, 4=Info
     prefix = {0: "Qt debug", 1: "Qt warning", 2: "Qt critical",
               3: "Qt fatal", 4: "Qt info"}.get(mode, "Qt")
     print(f"{prefix}: {message}", file=sys.stderr)
+    if _crash_fh is not None and mode in (2, 3):  # Critical, Fatal
+        try:
+            _crash_fh.write(f"[{prefix}] {message}\n")
+        except Exception:
+            pass
 
 
 def main():

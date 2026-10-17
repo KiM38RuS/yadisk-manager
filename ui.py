@@ -3,6 +3,7 @@ PySide6 GUI — двухпанельный файловый менеджер д�
 Фичи: on-demand sync, трей, автозапуск, прогресс, разрешение конфликтов.
 """
 
+import faulthandler
 import logging
 import os
 import re
@@ -11,7 +12,6 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -114,6 +114,45 @@ def _is_thread_alive(thread) -> bool:
         return thread.isRunning()
     except RuntimeError:
         return False
+
+
+def _freeze_dump_path() -> str:
+    """Путь к дампу зависаний — рядом с yadisk.log/crash.log."""
+    return os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "yadisk-client", "freeze.log")
+
+
+def _dump_all_threads() -> str:
+    """Записать стеки ВСЕХ потоков в freeze.log (faulthandler, C-уровень).
+
+    Возвращает путь к файлу либо "" при ошибке. Исключений не бросает:
+    монитор зависаний не имеет права падать сам.
+
+    Почему не `sys._current_frames()` + `traceback.format_stack()`:
+    этот способ строит Python-объекты чужого потока и читает исходники
+    с диска, пока заблокированный главный поток держит GIL. На v0.12.2
+    это давало нативное падение (0xc0000005) — приложение умирало молча
+    в момент логирования зависания.
+    """
+    try:
+        path = _freeze_dump_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Простая ротация: один предыдущий freeze.log.old (лимит ~1 МБ)
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > 1_000_000:
+                os.replace(path, path + ".old")
+        except Exception:
+            pass
+        with open(path, "a", encoding="utf-8", buffering=1) as fh:
+            fh.write("\n===== FREEZE dump %s =====\n"
+                     % time.strftime("%Y-%m-%d %H:%M:%S"))
+            faulthandler.dump_traceback(file=fh, all_threads=True)
+        return path
+    except Exception:
+        logger.debug("freeze dump failed", exc_info=True)
+        return ""
+
 
 class MainWindow(QMainWindow):
     def __init__(self, api: disk_api.YaDiskAPI,
@@ -326,23 +365,33 @@ class MainWindow(QMainWindow):
         """Daemon-поток: проверяет heartbeat главного потока.
 
         Если heartbeat не обновлялся >500ms — главный поток заблокирован
-        (Qt C++ paint / layout / Python-код). Логирует stacktrace.
+        (Qt C++ paint / layout / Python-код). Стеки всех потоков пишутся
+        в freeze.log безопасным способом (см. _dump_all_threads), а
+        сообщение уходит в лог один раз за эпизод зависания: раньше оно
+        летело каждые 200 мс и раздувало лог до десятков МБ.
         """
+        episode = False
+        peak_ms = 0.0
         while getattr(self, '_freeze_thread_running', True):
             time.sleep(0.2)
-            now = time.monotonic()
-            elapsed_ms = (now - self._heartbeat_ts) * 1000
+            elapsed_ms = (time.monotonic()
+                          - getattr(self, '_heartbeat_ts', time.monotonic())
+                          ) * 1000
             if elapsed_ms > 500:
-                # Достаём стек главного потока
-                main_id = threading.main_thread().ident
-                frames = sys._current_frames().get(main_id)
-                stack = ""
-                if frames:
-                    stack = "\n" + "".join(
-                        traceback.format_stack(frames))
-                logger.warning(
-                    "⚠️ FREEZE: UI blocked for ~%d ms%s",
-                    int(elapsed_ms), stack)
+                if not episode:
+                    episode = True
+                    peak_ms = elapsed_ms
+                    path = _dump_all_threads()
+                    logger.warning(
+                        "⚠️ FREEZE: UI blocked for ~%d ms%s",
+                        int(elapsed_ms),
+                        f"\n  стеки потоков → {path}" if path else "")
+                elif elapsed_ms > peak_ms:
+                    peak_ms = elapsed_ms
+            elif episode:
+                episode = False
+                logger.info("✅ FREEZE ENDED: UI was blocked for ~%d ms",
+                            int(peak_ms))
 
     def event(self, event):
         """Замер времени обработки каждого события MainWindow."""

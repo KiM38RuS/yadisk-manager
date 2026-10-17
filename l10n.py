@@ -473,6 +473,8 @@ LOG_RU = {
         "Ошибка sync_children_from_api: %s — запасной вариант только upsert",
     "⚠️ FREEZE: UI blocked for ~%d ms%s":
         "⚠️ ЗАВИСАНИЕ: интерфейс заблокирован на ~%d мс%s",
+    "✅ FREEZE ENDED: UI was blocked for ~%d ms":
+        "✅ ЗАВИСАНИЕ ЗАКОНЧИЛОСЬ: интерфейс был заблокирован ~%d мс",
     "⚠️ SLOW EVENT: type=%d(%s) on %s took %dms":
         "⚠️ МЕДЛЕННОЕ СОБЫТИЕ: type=%d(%s) на %s заняло %d мс",
     "⚠️ SLOW WINDOW EVENT: type=%d(%s) took %dms":

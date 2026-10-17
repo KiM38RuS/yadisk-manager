@@ -48,8 +48,11 @@ class TestAllFilesThreadParallel(unittest.TestCase):
     """Параллельная загрузка страниц через ThreadPoolExecutor."""
 
     def setUp(self):
-        from PySide6.QtCore import QCoreApplication
-        self._app = QCoreApplication.instance() or QCoreApplication([])
+        # QApplication (не QCoreApplication!): виджеты в последующих тестах
+        # (test_breadcrumbs и др.) требуют QApplication, а instance() вернёт
+        # уже созданный QCoreApplication и QApplication не создастся → hang.
+        from PySide6.QtWidgets import QApplication
+        self._app = QApplication.instance() or QApplication([])
 
         self.api = MagicMock()
         self.database = MagicMock()
