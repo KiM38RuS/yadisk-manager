@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.12.4 (2026-10-18)
+
+- **Исправлено (критическое)**: нативное падение приложения (0xc0000005) — лог обрывался ровно на `⚠️ FREEZE`, процесс умирал молча:
+  - Причина: `ui._freeze_monitor` строил стек главного потока через `sys._current_frames()` + `traceback.format_stack()` — построение Python-фреймов чужого потока и чтение исходников с диска, пока заблокированный главный поток держит GIL; в этот момент интерпретатор падал на уровне C, и в `yadisk.log` не оставалось ни traceback, ни следа (воспроизведено в тестах: 0xC0000409 на выходе после дампа)
+  - Фикс: `ui._dump_all_threads()` — стеки **всех** потоков через `faulthandler.dump_traceback(file=..., all_threads=True)` (C-уровень, без построения Python-фреймов) в отдельный `%APPDATA%\yadisk-client\freeze.log`; ротация ~1 МБ (`freeze.log.old`)
+- **Исправлено**: сообщение о зависании писалось каждые 200 мс, пока UI заблокирован (лог раздувался до десятков МБ) — теперь одно сообщение на эпизод зависания, с пиковой длительностью в `✅ FREEZE ENDED: UI was blocked for ~%d ms` по завершении (перевод добавлен в `l10n.py`)
+- **Новое**: crash-диагностика нативных падений (`main.py`) — `faulthandler.enable(all_threads=True)` пишет стеки всех потоков в `%APPDATA%\yadisk-client\crash.log` (ротация ~1 МБ, `crash.log.old`); сообщения Qt Critical/Fatal дополнительно уходят в тот же файл обычной записью (в frozen exe stderr теряется) — следующий нативный краш оставит стеки, а не пустой лог
+- **Исправлено**: двойной файловый watcher — `ui_threads.StartupScanThread` объявлял `finished = Signal()`, затеняя встроенный `QThread.finished` той же сигнатуры; поток эмитил сигнал вручную, а Qt — ещё раз при выходе из `run()` → слот старта watcher вызывался дважды и создавал **два** наблюдателя. Теперь используется встроенный `finished` (ручной `emit` убран)
+- **Исправлено**: README — статичный бейдж `version-0.12.0` заменён на живой `img.shields.io/github/v/release/KiM38RuS/yadisk-manager?include_prereleases=` (все релизы — pre-release, без флага бейдж показывал бы «no releases»)
+- **Тесты**: `tests/test_freeze_detector.py` (5 тестов — одно сообщение на эпизод, дамп содержит стеки других потоков, отказ `sys._current_frames` не валит монитор, ошибка дампа не смертельна, сообщение о завершении эпизода) и `tests/test_startup_scan_finished.py` (двойной watcher) — всего **287** тестов; в `tests/conftest.py` добавлена изоляция реального состояния приложения (реальные `MainWindow` глушатся после теста; `_start_all_files_load`/`_start_bulk_sync` — no-op), из-за чего прогон перестал падать fail-fast `0xC0000409` на выходе интерпретатора (утечка 13 окон / 56 потоков)
+
 ## v0.12.3 (2026-10-17)
 
 - **Исправлено**: спам в лог `urllib3 ... Connection pool is full, discarding connection: cloud-api.yandex.net. Connection pool size: 1` (до 5566 строк за сессию) — PLANS 2.15:
