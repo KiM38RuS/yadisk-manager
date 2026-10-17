@@ -152,16 +152,15 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 | 8 | **Git commit + push** | `git add` (`.py`, `.md`, `Backup/`), `git commit`, `git push origin main` |
 | 9 | **Git tag** | `git tag v{ver}`, `git push origin v{ver}` |
 | 10 | **Создать релиз на GitHub** | GitHub → Releases → Draft new release → выбрать тег, загрузить `YaDiskManager_v{ver}_portable.exe` + `YaDiskManager_v{ver}_setup.exe` (см. «📦 Имена ассетов релиза») |
-| 11 | **Переименовать сессию** | Если harness доступен: `hermes sessions rename $ID "YaDiskManager v{ver} [описание]"` |
+| 11 | **Переименовать сессию** | Переименовать текущую сессию в формат `YaDiskManager v{ver} [описание]`, если среда это поддерживает (см. «🏷️ Именование сессий») |
 
 ### 🏷️ Именование сессий
 
-При изменении версии проекта (bump в `_version.py`) агент автоматически переименовывает текущую сессию в формат:
+При изменении версии проекта (bump в `_version.py`) агент переименовывает текущую сессию в формат:
 ```
 YaDiskManager v0.X.Y [краткое описание изменений]
 ```
-Команда: `hermes sessions rename $HERMES_SESSION_ID "YaDiskManager v0.X.Y ..."`
-Это позволяет легко находить в списке сессий, с какой версией велась работа.
+Если среда не предоставляет средств переименования — шаг просто пропускается. Это позволяет легко находить в списке сессий, с какой версией велась работа.
 
 ### 🧪 Тестирование файловых операций (агентное)
 
