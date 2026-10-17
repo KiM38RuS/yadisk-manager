@@ -345,6 +345,17 @@ class HealedAdapter(HTTPAdapter):
         STATE.cache = cache or IpCache()
         STATE.resolver = resolver or DoHResolver()
 
-    def init_poolmanager(self, *args, **kwargs):
-        kwargs.setdefault("block", False)
-        self.poolmanager = _HealedPoolManager(*args, **kwargs)
+    def init_poolmanager(self, connections, maxsize, block=False,
+                         **pool_kwargs):
+        # Именованные параметры — как в HTTPAdapter.init_poolmanager.
+        # Раньше был проброс *args в PoolManager(num_pools, headers, **kw):
+        # pool_maxsize уезжал в `headers`, а maxsize терялся — пул
+        # создавался с дефолтом urllib3 maxsize=1, отсюда спам в логе
+        # "Connection pool is full, discarding connection:
+        # cloud-api.yandex.net. Connection pool size: 1".
+        self._pool_connections = connections
+        self._pool_maxsize = maxsize
+        self._pool_block = block
+        self.poolmanager = _HealedPoolManager(
+            num_pools=connections, maxsize=maxsize, block=block,
+            **pool_kwargs)

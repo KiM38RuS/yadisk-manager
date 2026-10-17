@@ -87,9 +87,10 @@ def get_shared_session() -> requests.Session:
     использовали голые requests.get() (каждый вызов = новая сессия
     с дефолтным пулом 1).
 
-    Не использовать для обращений к cloud-api.yandex.net — для этого есть
-    YaDiskAPI, который монтирует HealedAdapter и применяет NetHeal-обход
-    блокировок. Здесь — общий пул для прочих хостов.
+    Не использовать для обращений к cloud-api.yandex.net — YaDiskAPI держит
+    собственную сессию (с HealedAdapter и заголовком Authorization), а эта
+    сессия ходит в GitHub/DoH и НЕ должна носить OAuth-токен Яндекса;
+    иначе токен утечёт на api.github.com (см. updater.fetch_latest_release).
     """
     global _shared_session
     if _shared_session is not None:
@@ -109,8 +110,10 @@ def get_shared_session() -> requests.Session:
 class YaDiskAPI:
     """Тонкая обёртка над REST API Яндекс.Диска.
 
-    Использует общую сессию с пулом соединений POOL_SIZE=30
-    (см. get_shared_session), чтобы избежать предупреждений
+    Держит СВОЮ requests.Session с пулом соединений POOL_SIZE=30 — общая
+    сессия (get_shared_session) исключена, иначе заголовок
+    'Authorization: OAuth <token>' уезжал бы вместе с ней на api.github.com
+    (updater) и в DoH-резолвер. Свой пул избавляет от предупреждений
     'Connection pool is full, discarding connection:
     cloud-api.yandex.net. Connection pool size: 1' при высокой нагрузке.
     Документация: https://yandex.ru/dev/disk/rest/
@@ -118,22 +121,21 @@ class YaDiskAPI:
 
     def __init__(self, token: str, net_heal_enabled_fn=None):
         self.token = token
-        # Используем общую сессию с пулом соединений POOL_SIZE=30,
-        # вместо создания новой Session с дефолтным пулом size=1.
-        # Это фикс для предупреждений "Connection pool is full, discarding
-        # connection: cloud-api.yandex.net. Connection pool size: 1" в логе.
-        self._session = get_shared_session()
-        # Увеличиваем пул соединений — 35+ одновременных скачиваний не должны
-        # блокироваться стандартным pool_connections=10
+        # Приватная сессия: OAuth-токен Яндекса НЕ должен попадать в
+        # get_shared_session() (её использует updater для api.github.com).
+        self._session = requests.Session()
+        # Пул POOL_SIZE, а не дефолтный maxsize=1: 35+ одновременных
+        # скачиваний иначе лог-засоряют "Connection pool is full, discarding
+        # connection: cloud-api.yandex.net. Connection pool size: 1".
         if net_heal_enabled_fn is not None:
             # Обход DNS/TCP-блокировок: системный DNS первый, при сбое —
             # кэш IP / DNS-over-HTTPS (см. net_heal.py).
             adapter = net_heal.HealedAdapter(
-                pool_connections=30, pool_maxsize=30,
+                pool_connections=POOL_SIZE, pool_maxsize=POOL_SIZE,
                 enabled_fn=net_heal_enabled_fn)
         else:
             adapter = requests.adapters.HTTPAdapter(
-                pool_connections=30, pool_maxsize=30)
+                pool_connections=POOL_SIZE, pool_maxsize=POOL_SIZE)
         self._session.mount("https://", adapter)
         self._rate_limiter = _RateLimiter()
         self._session.headers.update({

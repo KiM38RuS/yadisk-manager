@@ -488,6 +488,22 @@ class TestHealedAdapterWiring:
         assert isinstance(pool, net_heal._HealedHTTPSConnectionPool)
         assert pool.ConnectionCls is net_heal.HealedHTTPSConnection
 
+    def test_pool_maxsize_reaches_connection_pool(self, heal_state):
+        # Регресс: init_poolmanager пробрасывал *args позиционно в
+        # PoolManager(num_pools, headers, **kw) — pool_maxsize уезжал в
+        # `headers`, а maxsize терялся. Пул создавался с дефолтом urllib3
+        # maxsize=1 → спам в логе "Connection pool is full, discarding
+        # connection: cloud-api.yandex.net. Connection pool size: 1".
+        adapter = net_heal.HealedAdapter(pool_connections=30, pool_maxsize=30)
+        pool = adapter.poolmanager.connection_from_url("https://x.test/")
+        assert pool.pool.maxsize == 30
+
+    def test_poolmanager_headers_not_polluted(self, heal_state):
+        # Тот же проброс *args клал число pool_maxsize в headers= у
+        # PoolManager — мусор, который однажды сломает склейку заголовков.
+        adapter = net_heal.HealedAdapter(pool_connections=30, pool_maxsize=30)
+        assert adapter.poolmanager.headers == {}
+
     def test_adapter_publishes_state(self, heal_state):
         cache = net_heal.IpCache()
         resolver = StubResolver()

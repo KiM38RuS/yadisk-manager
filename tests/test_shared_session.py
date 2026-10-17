@@ -12,6 +12,8 @@ get_shared_session() возвращает singleton с HTTPAdapter(pool_maxsize=
 - при явной передаче session в DoHResolver — он используется как есть
 - при session=None — DoHResolver всё равно создаёт сессию с пулом > 1
 - при многократном вызове get_shared_session() — НЕ создаются новые адаптеры
+- YaDiskAPI НЕ делит сессию с updater/DoH: OAuth-токен Яндекса остаётся
+  в приватной сессии и не уходит на api.github.com
 """
 import os
 import sys
@@ -97,6 +99,56 @@ class TestDoHResolverPool(unittest.TestCase):
         own = requests.Session()
         resolver = net_heal.DoHResolver(session=own)
         self.assertIs(resolver._session, own)
+
+
+class TestYaDiskApiSessionIsolation(unittest.TestCase):
+    """YaDiskAPI держит собственную сессию.
+
+    Общая сессия (get_shared_session) обслуживает updater (api.github.com) и
+    DoHResolver. Если YaDiskAPI ставит на неё 'Authorization: OAuth <token>',
+    токен Яндекса уходит на GitHub. Здесь проверяем, что сессии раздельные,
+    а пул приватной сессии при этом не деградировал до urllib3-дефолта 1.
+    """
+
+    def setUp(self):
+        """Сбросить singleton, чтобы тесты не зависели от порядка запуска."""
+        disk_api._shared_session = None
+
+    def test_api_session_is_not_shared_session(self):
+        api = disk_api.YaDiskAPI("tok", net_heal_enabled_fn=lambda: True)
+        self.assertIsNot(api._session, disk_api.get_shared_session())
+
+    def test_shared_session_has_no_oauth_token(self):
+        disk_api.YaDiskAPI("tok", net_heal_enabled_fn=lambda: True)
+        self.assertNotIn("Authorization",
+                         disk_api.get_shared_session().headers)
+
+    def test_private_session_carries_oauth_token(self):
+        api = disk_api.YaDiskAPI("tok", net_heal_enabled_fn=lambda: True)
+        auth = api._session.headers.get("Authorization", "")
+        self.assertTrue(auth.startswith("OAuth "),
+                        f"Приватная сессия должна носить OAuth-токен, "
+                        f"а несёт: {auth!r}")
+
+    def test_heal_adapter_pool_matches_pool_size(self):
+        """Реальный maxsize пула heal-адаптера равен POOL_SIZE.
+
+        Регресс: пул = 1 → спам 'Connection pool is full, discarding
+        connection: cloud-api.yandex.net. Connection pool size: 1'.
+        """
+        api = disk_api.YaDiskAPI("tok", net_heal_enabled_fn=lambda: True)
+        url = "https://cloud-api.yandex.net/v1/disk"
+        adapter = api._session.get_adapter(url)
+        pool = adapter.poolmanager.connection_from_url(url)
+        self.assertEqual(pool.pool.maxsize, disk_api.POOL_SIZE)
+
+    def test_plain_adapter_pool_above_one(self):
+        """Без heal-обхода адаптер тоже получает пул > 1 (не дефолт urllib3)."""
+        api = disk_api.YaDiskAPI("tok")
+        url = "https://cloud-api.yandex.net/v1/disk"
+        adapter = api._session.get_adapter(url)
+        pool = adapter.poolmanager.connection_from_url(url)
+        self.assertGreater(pool.pool.maxsize, 1)
 
 
 if __name__ == "__main__":
