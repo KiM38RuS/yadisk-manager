@@ -123,6 +123,20 @@ def _freeze_dump_path() -> str:
         "yadisk-client", "freeze.log")
 
 
+def _repo_url() -> str:
+    """URL репозитория проекта для окна «О программе».
+
+    Берётся из updater.UPDATE_REPO (единый источник правды: он же
+    используется системой обновлений). Если репозиторий не заполнен,
+    отдаём публичный адрес проекта — битой ссылки «https://github.com/»
+    в окне быть не должно.
+    """
+    repo = (getattr(updater, "UPDATE_REPO", "") or "").strip().strip("/")
+    if not repo or "/" not in repo:
+        repo = "KiM38RuS/yadisk-manager"
+    return f"https://github.com/{repo}"
+
+
 def _dump_all_threads() -> str:
     """Записать стеки ВСЕХ потоков в freeze.log (faulthandler, C-уровень).
 
@@ -1409,16 +1423,16 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        act_logout = QAction("Выйти из аккаунта", self)
-        act_logout.setIcon(_svg_icon("log-out-svgrepo-com.svg", 24))
-        act_logout.triggered.connect(self._logout_and_reauth)
-        file_menu.addAction(act_logout)
+        self._act_logout = QAction("Выйти из аккаунта", self)
+        self._act_logout.setIcon(_svg_icon("log-out-svgrepo-com.svg", 24))
+        self._act_logout.triggered.connect(self._logout_and_reauth)
+        file_menu.addAction(self._act_logout)
 
-        act_quit = QAction("Выход", self)
-        act_quit.setIcon(_svg_icon("close-red.svg", 24))
-        act_quit.setShortcut(QKeySequence("Ctrl+Q"))
-        act_quit.triggered.connect(self._menu_quit)
-        file_menu.addAction(act_quit)
+        self._act_quit = QAction("Выход", self)
+        self._act_quit.setIcon(_svg_icon("close-red.svg", 24))
+        self._act_quit.setShortcut(QKeySequence("Ctrl+Q"))
+        self._act_quit.triggered.connect(self._menu_quit)
+        file_menu.addAction(self._act_quit)
 
         # ── Правка ────────────────────────────────────────
         edit_menu = mb.addMenu("Правка")
@@ -1469,6 +1483,10 @@ class MainWindow(QMainWindow):
 
         # ── Справка ───────────────────────────────────────
         help_menu = mb.addMenu("Справка")
+        self._act_check_updates = QAction("Проверить обновления…", self)
+        self._act_check_updates.setIcon(_svg_icon("refresh.svg", 24))
+        self._act_check_updates.triggered.connect(self._check_updates_manual)
+        help_menu.addAction(self._act_check_updates)
         self._act_about = QAction("О программе", self)
         self._act_about.setIcon(_svg_icon("help-svgrepo-com.svg", 24))
         self._act_about.triggered.connect(self._show_about)
@@ -1634,7 +1652,8 @@ class MainWindow(QMainWindow):
     # ── Toolbar: обновление иконок ─────────────────────────
 
     def _refresh_toolbar_icons(self):
-        """Перезагрузить иконки тулбара при смене темы."""
+        """Перезагрузить иконки тулбара и меню при смене темы."""
+        self._refresh_menu_icons()
         if not hasattr(self, '_tb_nav_back'):
             return
         self._tb_nav_back.setIcon(_svg_icon("arrow-left-1.svg", 36))
@@ -1646,6 +1665,32 @@ class MainWindow(QMainWindow):
         self._tb_leave.setIcon(_svg_icon("cloud.svg", 36))
         # Обновить состояние кнопок
         self._update_toolbar_buttons()
+
+    def _refresh_menu_icons(self):
+        """Перезагрузить иконки пунктов меню при смене темы.
+
+        Меню строится один раз в _create_menu(), а светлый/тёмный вариант
+        иконки выбирает _svg_icon() по текущей теме. Без перезагрузки
+        после смены темы «на лету» в тёмном меню оставалась чёрная иконка
+        (например, «Справка → О программе») до перезапуска приложения.
+        """
+        if not hasattr(self, "_act_save"):
+            return
+        self._act_save.setIcon(_svg_icon("loaded.svg", 24))
+        self._act_leave.setIcon(_svg_icon("cloud.svg", 24))
+        self._act_refresh.setIcon(_svg_icon("refresh.svg", 24))
+        self._act_settings.setIcon(_svg_icon("settings-grey.svg", 24))
+        self._act_logout.setIcon(_svg_icon("log-out-svgrepo-com.svg", 24))
+        self._act_quit.setIcon(_svg_icon("close-red.svg", 24))
+        self._act_copy.setIcon(_svg_icon("Copy.svg", 24))
+        self._act_cut.setIcon(_svg_icon("scissors-3.svg", 24))
+        self._act_paste.setIcon(_svg_icon("paste.svg", 24))
+        self._act_delete.setIcon(_svg_icon("trash.svg", 24))
+        self._act_new_folder.setIcon(_svg_icon("folder-add-yellow.svg", 24))
+        self._act_get_link.setIcon(_svg_icon("link.svg", 24))
+        self._act_restart.setIcon(_svg_icon("refresh.svg", 24))
+        self._act_check_updates.setIcon(_svg_icon("refresh.svg", 24))
+        self._act_about.setIcon(_svg_icon("help-svgrepo-com.svg", 24))
 
     # ── Toolbar: состояние кнопок ──────────────────────────
 
@@ -1800,8 +1845,9 @@ class MainWindow(QMainWindow):
 
         self._tray_menu.addSeparator()
 
-        act_check_updates = QAction("Проверить обновления…", self)
-        act_check_updates.triggered.connect(self._check_updates_manual)
+        # Тот же QAction, что и в меню «Справка» — единый пункт
+        # «Проверить обновления…» (иконка refresh.svg, один обработчик)
+        act_check_updates = self._act_check_updates
         self._tray_menu.addAction(act_check_updates)
 
         self._tray_menu.addSeparator()
@@ -5333,19 +5379,57 @@ class MainWindow(QMainWindow):
         self._show_left_busy("Синхронизация с облаком...")
         thread.start()
 
-    def _show_about(self):
-        QMessageBox.about(
-            self, "YaDisk Manager",
-            f"Клиент Яндекс.Диска\nВерсия {VERSION}\n\n"
-            "On-demand синхронизация:\n"
-            "• Файлы видны в облаке, скачиваются по требованию\n"
-            "• Двойной клик → скачать и открыть\n"
-            "• Изменения → авто-загрузка в облако\n"
-            "• Разрешение конфликтов\n"
-            "• Системный трей\n"
-            "• Автозапуск\n\n"
-            "Написано на Python + PySide6",
+    def _about_html(self) -> str:
+        """Rich-text содержимое окна «О программе» (с ссылкой на GitHub)."""
+        url = _repo_url()
+        return (
+            f"<p><b>Клиент Яндекс.Диска</b><br>Версия {VERSION}</p>"
+            "<p>On-demand синхронизация:<br>"
+            "• Файлы видны в облаке, скачиваются по требованию<br>"
+            "• Двойной клик → скачать и открыть<br>"
+            "• Изменения → авто-загрузка в облако<br>"
+            "• Разрешение конфликтов<br>"
+            "• Системный трей<br>"
+            "• Автозапуск</p>"
+            f'<p><a href="{url}">{url}</a><br>'
+            "Написано на Python + PySide6</p>"
         )
+
+    def _build_about_box(self) -> QMessageBox:
+        """Собрать окно «О программе»: иконка программы + ссылка на репозиторий.
+
+        Почему не статический QMessageBox.about(): он не принимает ни
+        иконку, ни rich-text, поэтому в окне не было ни иконки программы,
+        ни ссылки на GitHub.
+
+        Модальность — WindowModal (не ApplicationModal): иначе блокируется
+        и окно лога, у которого нет Qt-родителя (та же причина, что и в
+        _show_settings).
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("YaDisk Manager")
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon = MainWindow._pick_window_icon()
+        if not icon.isNull():
+            box.setWindowIcon(icon)
+            box.setIconPixmap(box.windowIcon().pixmap(64, 64))
+        box.setTextFormat(Qt.RichText)
+        box.setText(self._about_html())
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setDefaultButton(QMessageBox.Ok)
+        # Клик по ссылке → внешний браузер. QLabel.openExternalLinks сам
+        # вызывает QDesktopServices; явная подписка на linkActivated —
+        # страховка на случай, если Qt отдаст URL сигналом.
+        for lbl in box.findChildren(QLabel):
+            lbl.setOpenExternalLinks(True)
+            lbl.linkActivated.connect(
+                lambda u: QDesktopServices.openUrl(QUrl(u)))
+        box.setWindowModality(Qt.WindowModal)
+        return box
+
+    def _show_about(self):
+        self._build_about_box().exec()
 
     def _on_context_menu(self, pos):
         index = self.table_view.indexAt(pos)
