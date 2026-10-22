@@ -11,6 +11,9 @@
 
 import sys
 import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -130,6 +133,59 @@ class TestFindUpdate(unittest.TestCase):
     def test_no_assets_no_update(self):
         with self._patch_session(self._release("v0.12.0", [])):
             self.assertIsNone(updater.find_update("u/r", "0.11.6"))
+
+
+class TestApplyUpdateCreationFlags(unittest.TestCase):
+    """apply_update: флаги запуска apply_update.bat.
+
+    Регресс v0.11.6–v0.12.5: в apply_update creationflags задан как
+    `0x08000000 | 0x00000004` с комментарием `CREATE_NO_WINDOW |
+    DETACHED_PROCESS`, но 0x4 — это CREATE_SUSPENDED (DETACHED_PROCESS
+    = 0x8). cmd.exe создавался приостановленным и bat никогда не
+    выполнялся: обновление скачивалось, приложение закрывалось —
+    дальше тишина, в системе оставался зомби cmd.exe (Suspended).
+    """
+
+    def _apply_in_sandbox(self):
+        """apply_update в песочнице: frozen, Popen замокан."""
+        sandbox = tempfile.mkdtemp(prefix="ydm-test-apply-")
+        self.addCleanup(shutil.rmtree, sandbox, ignore_errors=True)
+        exe = os.path.join(sandbox, "YaDiskManager.exe")
+        new_exe = os.path.join(sandbox, "YaDiskManager.new.exe")
+        for f in (exe, new_exe):
+            with open(f, "wb"):
+                pass
+        with mock.patch.object(updater.sys, "frozen", True, create=True), \
+                mock.patch.object(updater.sys, "executable", exe), \
+                mock.patch.object(updater.subprocess, "Popen") as popen:
+            ok = updater.apply_update(new_exe)
+        return ok, popen, sandbox
+
+    def test_no_create_suspended_flag(self):
+        ok, popen, _ = self._apply_in_sandbox()
+        self.assertTrue(ok, "apply_update должен запустить bat")
+        popen.assert_called_once()
+        flags = popen.call_args.kwargs["creationflags"]
+        self.assertFalse(
+            flags & 0x4,
+            "creationflags содержит CREATE_SUSPENDED (0x4): cmd.exe "
+            "стартует приостановленным и apply_update.bat не выполнится",
+        )
+
+    def test_flags_are_detached_and_no_window(self):
+        ok, popen, _ = self._apply_in_sandbox()
+        self.assertTrue(ok)
+        flags = popen.call_args.kwargs["creationflags"]
+        self.assertEqual(
+            flags,
+            subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+        )
+
+    def test_bat_written_next_to_exe(self):
+        _, popen, sandbox = self._apply_in_sandbox()
+        bat = popen.call_args.args[0][2]
+        self.assertEqual(os.path.dirname(bat), sandbox)
+        self.assertTrue(os.path.isfile(bat))
 
 
 if __name__ == "__main__":

@@ -624,6 +624,24 @@ D:\Program_Files\YaDiskManager\
 
 ---
 
+## Изменения v0.12.5 — v0.12.6
+
+### Обновления
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `updater.apply_update()` | `creationflags` для `cmd.exe` был `0x08000000 \| 0x00000004` с комментарием `CREATE_NO_WINDOW \| DETACHED_PROCESS` — но `0x4` это `CREATE_SUSPENDED` (`DETACHED_PROCESS` = `0x8`). `cmd.exe` создавался приостановленным, `apply_update.bat` не выполнялся: приложение закрывалось, `YaDiskManager.new.exe` оставался рядом, перезапуска не было (баг с v0.11.6). Теперь `subprocess.CREATE_NO_WINDOW \| subprocess.DETACHED_PROCESS` — именованные константы из `subprocess`, чтобы флаг снова не подменился hex-числом |
+| Миграция | Все сборки ≤ 0.12.5 несут баг, поэтому не могут обновиться сами: они скачивают новый exe и «молчат». Восстановление — вручную запустить сгенерированный `apply_update.bat` рядом с exe (переименует exe и запустит новую версию) либо скачать portable-ассет с GitHub Releases. С 0.12.6 авто-обновление работает |
+| Диагностика зомби | Зависший `cmd.exe` от старого бага: `WaitReason=Suspended`, CPU = 0, ~2 handles, нет дочернего `ping.exe` (bat использует `ping` как паузу перед переименованием). Процесс можно снимать |
+
+### Тесты
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `tests/test_updater.py` | Класс `TestApplyUpdateCreationFlags` (3 теста): флаги не содержат `CREATE_SUSPENDED` (0x4); флаги равны ровно `subprocess.CREATE_NO_WINDOW \| subprocess.DETACHED_PROCESS`; `apply_update.bat` пишется в каталог exe. Тесты работают в песочнице (`tempfile`) с замоканным `Popen`, `sys.frozen = True`. Всего в прогоне **307** тестов |
+
+---
+
 ## Изменения v0.12.4 — v0.12.5
 
 ### Меню и диалоги

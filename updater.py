@@ -239,7 +239,11 @@ def apply_update(new_exe: str) -> bool:
     try:
         with open(bat, "w", encoding="ascii", newline="\r\n") as f:
             f.write(_APPLY_BAT)
-        creation = 0x08000000 | 0x00000004  # CREATE_NO_WINDOW | DETACHED_PROCESS
+        # ВАЖНО: 0x4 — это CREATE_SUSPENDED, а НЕ DETACHED_PROCESS (= 0x8)!
+        # Старое значение 0x08000000 | 0x00000004 создавало cmd.exe
+        # приостановленным: apply_update.bat не выполнялся, обновление
+        # «висело» — приложение закрывалось и не перезапускалось.
+        creation = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
         subprocess.Popen(["cmd.exe", "/c", bat],
                          cwd=exe_dir, creationflags=creation,
                          close_fds=True)

@@ -3,7 +3,7 @@
 ; (пути к файлам — относительно папки скрипта)
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.12.5"
+  #define MyAppVersion "0.12.6"
 #endif
 
 #define MyAppName "YaDisk Manager"
