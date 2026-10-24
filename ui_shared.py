@@ -316,6 +316,24 @@ def _local_path(cloud_path: str) -> str:
     return os.path.join(_cache_dir(), clean.lstrip("/"))
 
 
+def build_copy_paths_text(items, local_path_fn) -> str:
+    """Текст для «Копировать как путь» (PLANS 1.11).
+
+    Для каждого элемента — облачный путь и локальный путь в кеше.
+    Элементы разделены пустой строкой. Если local_path_fn вернул пустую
+    строку, локальная строка не добавляется.
+    """
+    blocks = []
+    for item in items:
+        cloud_path = item.get("cloud_path", "")
+        lines = [f"Облако: {cloud_path}"]
+        local_path = local_path_fn(cloud_path) or ""
+        if local_path:
+            lines.append(f"Компьютер: {local_path}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def normalize_cloud_path(path: str) -> str:
     """Нормализовать облачный путь: ведущий '/', без хвостовых и двойных слэшей.
 

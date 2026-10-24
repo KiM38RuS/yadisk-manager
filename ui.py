@@ -51,6 +51,7 @@ from ui_shared import (
     POLL_INTERVAL_MS,
     _autorun_is_enabled, _autorun_set,
     advance_rotation,
+    build_copy_paths_text,
 )
 from ui_braille_spinner import BrailleSpinner as _BrailleSpinner
 from ui_wave_spinner import WaveSpinner as _WaveSpinner
@@ -1460,6 +1461,14 @@ class MainWindow(QMainWindow):
         self._act_paste.setShortcut(QKeySequence("Ctrl+V"))
         self._act_paste.triggered.connect(self._paste_from_buffer)
         edit_menu.addAction(self._act_paste)
+
+        # PLANS 1.11: облачный + локальный путь в буфер (как в Проводнике)
+        self._act_copy_path = QAction("Копировать как путь", self)
+        self._act_copy_path.setToolTip(
+            "Скопировать облачный и локальный путь выделенных элементов")
+        self._act_copy_path.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        self._act_copy_path.triggered.connect(self._copy_paths_to_clipboard)
+        edit_menu.addAction(self._act_copy_path)
 
         self._act_delete = QAction("Удалить", self)
         self._act_delete.setIcon(_svg_icon("trash.svg", 24))
@@ -4625,6 +4634,32 @@ class MainWindow(QMainWindow):
         """Вырезать выделенные элементы (Ctrl+X)."""
         self._copy_to_buffer(action="cut")
 
+    def _copy_paths_to_clipboard(self, cloud_paths=None, local_path_fn=None):
+        """Скопировать облачный и локальный путь в буфер (PLANS 1.11).
+
+        cloud_paths — явный список путей (ПКМ в дереве); по умолчанию берётся
+        выделение таблицы.
+        """
+        if cloud_paths is not None and not isinstance(cloud_paths, (list, tuple)):
+            # QAction.triggered передаёт checked=False первым аргументом
+            cloud_paths = None
+        if cloud_paths is not None:
+            items = [{"cloud_path": cp} for cp in cloud_paths if cp]
+        else:
+            model = self.table_view.selectionModel()
+            rows = model.selectedRows(0) if model is not None else []
+            items = []
+            for idx in rows:
+                item = self._get_item(idx)
+                if item and not item.get("is_parent_nav"):
+                    items.append(item)
+        if not items:
+            return
+        text = build_copy_paths_text(items, local_path_fn or _local_path)
+        QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(
+            f"Путь скопирован: {len(items)} элемент(ов)", 5000)
+
     def _paste_from_buffer(self):
         """Вставить элементы из буфера в текущую папку.
 
@@ -5585,6 +5620,8 @@ class MainWindow(QMainWindow):
         act.setIcon(_svg_icon("scissors-3.svg", 24))
         act = menu.addAction("Копировать", self._copy_to_buffer)
         act.setIcon(_svg_icon("Copy.svg", 24))
+        act = menu.addAction("Копировать как путь", self._copy_paths_to_clipboard)
+        act.setToolTip("Облачный и локальный путь в буфер обмена (PLANS 1.11)")
         if self._clipboard_buffer:
             act = menu.addAction("Вставить", self._paste_from_buffer)
             act.setIcon(_svg_icon("paste.svg", 24))
@@ -5634,6 +5671,8 @@ class MainWindow(QMainWindow):
         act.setIcon(_svg_icon("scissors-3.svg", 24))
         act = menu.addAction("Копировать", self._copy_to_buffer)
         act.setIcon(_svg_icon("Copy.svg", 24))
+        act = menu.addAction("Копировать как путь", self._copy_paths_to_clipboard)
+        act.setToolTip("Облачный и локальный путь в буфер обмена (PLANS 1.11)")
         if self._clipboard_buffer:
             act = menu.addAction("Вставить", self._paste_from_buffer)
             act.setIcon(_svg_icon("paste.svg", 24))
@@ -5730,6 +5769,10 @@ class MainWindow(QMainWindow):
         act.setIcon(_svg_icon("scissors-3.svg", 24))
         act = menu.addAction("Копировать", self._copy_to_buffer)
         act.setIcon(_svg_icon("Copy.svg", 24))
+        act = menu.addAction("Копировать как путь",
+                             lambda cp=cloud_path:
+                             self._copy_paths_to_clipboard([cp]))
+        act.setToolTip("Облачный и локальный путь в буфер обмена (PLANS 1.11)")
         if self._clipboard_buffer:
             act = menu.addAction("Вставить", self._paste_from_buffer)
             act.setIcon(_svg_icon("paste.svg", 24))
