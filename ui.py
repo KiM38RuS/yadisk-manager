@@ -5066,6 +5066,12 @@ class MainWindow(QMainWindow):
             self._rename_selected()
             return True
 
+        # Ctrl+A — выделить все файлы/папки, но не служебную строку «..»
+        # (PLANS 2.5: «..» в выделении ломает «Сохранить»/«Оставить»)
+        if key == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
+            self._select_all_files()
+            return True
+
         # Type-ahead: печатные символы
         if text and text.isprintable():
             self._typeahead_buf += text
@@ -5074,6 +5080,35 @@ class MainWindow(QMainWindow):
             return True
 
         return False  # не обработано — пусть Qt разберётся
+
+    def _select_all_files(self):
+        """Выделить все строки таблицы, кроме служебной «..» (PLANS 2.5).
+
+        Штатный QTableView.selectAll() выделяет и навигационную строку
+        родителя, из-за чего «Сохранить на компьютере» / «Оставить только
+        в облаке» получают в наборе путь папки, а не только файлы.
+        """
+        sel = self.table_view.selectionModel()
+        if sel is None:
+            return
+        sel.clearSelection()
+        last = None
+        for row in range(self.table_sort_model.rowCount()):
+            proxy_idx = self.table_sort_model.index(row, 0)
+            if not proxy_idx.isValid():
+                continue
+            item = self._get_item(proxy_idx)
+            if item and item.get("is_parent_nav"):
+                continue
+            sel.select(
+                proxy_idx,
+                QItemSelectionModel.Select | QItemSelectionModel.Rows,
+            )
+            last = proxy_idx
+        if last is not None:
+            sel.setCurrentIndex(last, QItemSelectionModel.NoUpdate)
+        self._update_toolbar_buttons()
+        self._update_selection_counter()
 
     def _clear_typeahead(self):
         """Сбросить буфер type-ahead (по таймауту)."""
