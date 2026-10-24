@@ -9,8 +9,8 @@ BreadcrumbBar — адресная строка с хлебными крошка
 from PySide6.QtCore import Qt, QEvent, Signal, QStringListModel
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QCompleter, QHBoxLayout, QLabel, QLineEdit, QMenu, QSizePolicy,
-    QToolButton, QWidget,
+    QApplication, QCompleter, QHBoxLayout, QLabel, QLineEdit, QMenu,
+    QSizePolicy, QToolButton, QWidget,
 )
 
 from ui_shared import normalize_cloud_path
@@ -210,11 +210,22 @@ class BreadcrumbBar(QWidget):
             self._rebuild()
 
     def eventFilter(self, obj, event):
-        if obj is self._editor and event.type() == QEvent.KeyPress \
-                and event.key() == Qt.Key_Escape:
-            self.cancel_edit()
-            return True
+        if obj is self._editor:
+            if event.type() == QEvent.KeyPress \
+                    and event.key() == Qt.Key_Escape:
+                self.cancel_edit()
+                return True
+            # PLANS 1.14: уход фокуса (клик мимо, Tab, переключение окна)
+            # закрывает режим ввода так же, как Esc — иначе редактор с
+            # устаревшим путём остаётся открытым.
+            if event.type() == QEvent.FocusOut and not self._popup_open():
+                self.cancel_edit()
         return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _popup_open() -> bool:
+        """Открыт ли popup автодополнения (тогда фокус ушёл в него, не отменяем)."""
+        return QApplication.activePopupWidget() is not None
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

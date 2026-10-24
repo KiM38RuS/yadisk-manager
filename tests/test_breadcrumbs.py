@@ -96,6 +96,44 @@ def test_editor_roundtrip(qapp):
     assert bar._crumbs.isHidden() is False
 
 
+# ── PLANS 1.14: потеря фокуса закрывает режим ввода (как Esc) ────────
+
+def _focus_out(bar):
+    """Смоделировать уход фокуса из редактора адресной строки."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QFocusEvent
+    qapp = __import__("PySide6.QtWidgets", fromlist=["QApplication"]).QApplication.instance()
+    qapp.sendEvent(bar._editor, QFocusEvent(QEvent.FocusOut))
+
+
+def test_focus_out_cancels_editor(qapp):
+    from ui_breadcrumbs import BreadcrumbBar
+    bar = BreadcrumbBar()
+    bar.set_path("/Загрузки")
+    bar.show_editor()
+    assert bar._editor.isHidden() is False
+
+    _focus_out(bar)
+
+    assert bar._editor.isHidden() is True     # редактор закрыт
+    assert bar._crumbs.isHidden() is False    # крошки вернулись
+    assert bar._editing is False
+
+
+def test_focus_out_keeps_editor_when_completer_popup_open(qapp, monkeypatch):
+    """Фокус ушёл в popup автодополнения — ввод продолжается."""
+    import ui_breadcrumbs
+    bar = ui_breadcrumbs.BreadcrumbBar()
+    bar.set_path("/A")
+    bar.show_editor()
+    monkeypatch.setattr(bar, "_popup_open", lambda: True)
+
+    _focus_out(bar)
+
+    assert bar._editor.isHidden() is False
+    assert bar._editing is True
+
+
 # ── Интеграция с MainWindow (без инстанцирования: unbound-вызов + моки) ──
 
 def _fake_mainwindow(db_get_file):
