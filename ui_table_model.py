@@ -10,9 +10,11 @@ try:
 except ImportError:  # не-Windows (например, в тестах)
     winreg = None
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QByteArray, QSortFilterProxyModel
 from PySide6.QtGui import QColor, QPalette, QPainter
-from PySide6.QtWidgets import QApplication, QStyledItemDelegate, QStyle, QStyleOptionViewItem
+from PySide6.QtWidgets import (
+    QApplication, QHeaderView, QStyledItemDelegate, QStyle, QStyleOptionViewItem,
+)
 
 import db
 from ui_shared import (
@@ -217,6 +219,55 @@ class RowHoverDelegate(QStyledItemDelegate):
                                                 text_rect.width())
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
         painter.restore()
+
+
+# ── Шапка таблицы: индексы колонок и настройки по умолчанию ──────────
+# Пользователь может менять ширину любой колонки и перетаскивать их;
+# состояние (ширины + порядок) сохраняется в config.json (PLANS 2.11–2.13).
+COL_STATUS, COL_NAME, COL_SIZE, COL_TYPE, COL_MODIFIED, COL_LOCATION = range(6)
+
+DEFAULT_COLUMN_WIDTHS = {
+    COL_STATUS: 28,      # иконка статуса — узкая, фиксированная
+    COL_NAME: 300,
+    COL_SIZE: 100,
+    COL_TYPE: 90,
+    COL_MODIFIED: 100,
+    COL_LOCATION: 180,   # видна только в результатах поиска
+}
+
+
+def apply_table_header_defaults(view) -> "QHeaderView":
+    """Настроить шапку таблицы: ресайз, перетаскивание, ширины по умолчанию.
+
+    Возвращает QHeaderView — для сохранения/восстановления состояния.
+    """
+    header = view.horizontalHeader()
+    header.setSectionsMovable(True)
+    model = view.model()
+    columns = model.columnCount() if model is not None else 0
+    for col in range(columns):
+        header.setSectionResizeMode(col, QHeaderView.Interactive)
+    for col, width in DEFAULT_COLUMN_WIDTHS.items():
+        if col < columns:
+            view.setColumnWidth(col, width)
+    if columns:
+        header.setSectionResizeMode(COL_STATUS, QHeaderView.Fixed)
+    return header
+
+
+def save_header_state(header) -> str:
+    """Состояние шапки (ширины + порядок) → base64-строка для config.json."""
+    return bytes(header.saveState().toBase64()).decode("ascii")
+
+
+def restore_header_state(header, data: str) -> bool:
+    """Восстановить состояние шапки. Пустые/битые данные — False."""
+    if not data:
+        return False
+    try:
+        return bool(header.restoreState(QByteArray.fromBase64(data.encode("ascii"))))
+    except Exception:  # noqa: BLE001 — битый конфиг не должен ронять запуск
+        return False
 
 
 class FileTableModel(QAbstractTableModel):

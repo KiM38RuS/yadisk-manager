@@ -57,7 +57,11 @@ from ui_wave_spinner import WaveSpinner as _WaveSpinner
 from ui_log import LogSignal, LogHandler, LogWindow
 from ui_workers import DownloadWorker, UploadWorker, ZipDownloadWorker as _ZipDownloadWorker
 from ui_tree_model import FolderTreeItem, FolderTreeModel
-from ui_table_model import RowHoverDelegate, FileTableModel, FileTableSortModel
+from ui_table_model import (
+    RowHoverDelegate, FileTableModel, FileTableSortModel,
+    COL_LOCATION, apply_table_header_defaults, save_header_state,
+    restore_header_state,
+)
 from ui_dialogs import AuthDialog, SettingsDialog, UpdateDialog
 from ui_threads import (
     WorkerThread as _WorkerThread,
@@ -826,23 +830,14 @@ class MainWindow(QMainWindow):
         self.table_view.sortByColumn(1, Qt.AscendingOrder)
         self.table_view.selectionModel().selectionChanged.connect(
             self._on_table_selection_changed)
-        # Resizable столбцы
-        for c in range(self.table_model.columnCount()):
-            self.table_view.horizontalHeader().setSectionResizeMode(
-                c, QHeaderView.Interactive)
-        # Ширина столбцов по умолчанию
-        self.table_view.setColumnWidth(0, 28)  # Статус (иконка) — минимальная ширина
-        self.table_view.setColumnWidth(1, 300)  # Имя
-        self.table_view.setColumnWidth(4, 100)  # Изменён
-        self.table_view.setColumnWidth(5, 180)  # Расположение
+        # Resizable столбцы: любая колонка тянется, порядок перетаскивается,
+        # ширины/порядок восстанавливаются из config.json (PLANS 2.11–2.13)
+        apply_table_header_defaults(self.table_view)
+        # «Размер» и «Тип» больше не заблокированы (было ResizeToContents) —
+        # ширина по умолчанию задана в DEFAULT_COLUMN_WIDTHS (PLANS 2.12)
         # Колонка «Расположение» видна только в результатах поиска
-        self.table_view.setColumnHidden(5, True)
-        self.table_view.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Fixed)
-        self.table_view.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeToContents)
-        self.table_view.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeToContents)
+        self.table_view.setColumnHidden(COL_LOCATION, True)
+        self._restore_table_header_state()
         self.table_view.doubleClicked.connect(self._on_file_double_clicked)
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(
@@ -865,9 +860,6 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-right: 1px solid palette(Midlight);
                 border-bottom: 1px solid palette(Midlight);
-            }
-            QHeaderView::section:last {
-                border-right: none;
             }
             QHeaderView::section:highlighted {
                 font-weight: normal;
@@ -1019,6 +1011,26 @@ class MainWindow(QMainWindow):
             self.move(
                 QGuiApplication.primaryScreen().availableGeometry().center()
                 - self.rect().center())
+
+    # ── Table header state (PLANS 2.11/2.13) ───────────────
+
+    def _restore_table_header_state(self) -> bool:
+        """Восстановить ширины и порядок колонок из config.json."""
+        data = db.get_table_header_state()
+        if not restore_header_state(self.table_view.horizontalHeader(), data):
+            return False
+        # Вне режима поиска «Расположение» должна быть скрыта
+        if not getattr(self, "_search_mode", False):
+            self.table_view.setColumnHidden(COL_LOCATION, True)
+        return True
+
+    def _save_table_header_state(self) -> None:
+        """Сохранить ширины и порядок колонок в config.json."""
+        try:
+            db.set_table_header_state(
+                save_header_state(self.table_view.horizontalHeader()))
+        except Exception:  # noqa: BLE001 — сохранение не должно мешать закрытию
+            logger.warning("Не удалось сохранить состояние колонок таблицы")
 
     @staticmethod
     def _dark_qss() -> str:
@@ -1210,9 +1222,6 @@ class MainWindow(QMainWindow):
             f"    border-right: 1px solid {border};\n"
             f"    border-bottom: 1px solid {border};\n"
             f"}}\n"
-            f"QHeaderView::section:last {{\n"
-            f"    border-right: none;\n"
-            f"}}\n"
             f"QHeaderView::section:highlighted {{\n"
             f"    font-weight: normal;\n"
             f"}}\n"
@@ -1285,9 +1294,6 @@ class MainWindow(QMainWindow):
                     border: none;
                     border-right: 1px solid {border};
                     border-bottom: 1px solid {border};
-                }}
-                QHeaderView::section:last {{
-                    border-right: none;
                 }}
                 QHeaderView::section:highlighted {{
                     font-weight: normal;
@@ -5753,6 +5759,7 @@ class MainWindow(QMainWindow):
             db.set_window_geometry(
                 self.saveGeometry().toBase64().data().decode())
             self._log_window.save_position()
+        self._save_table_header_state()
         self.hide()
         event.ignore()  # не закрывать — сворачиваем в трей
         # Уведомление при первом сворачивании
@@ -5804,6 +5811,7 @@ class MainWindow(QMainWindow):
             db.set_window_geometry(
                 self.saveGeometry().toBase64().data().decode())
             self._log_window.save_position()
+        self._save_table_header_state()
         # Отключаем лог-обработчик до разрушения MainWindow,
         # чтобы LogSignal не оказался удалён в момент позднего лога
         logging.getLogger().removeHandler(self._log_handler)

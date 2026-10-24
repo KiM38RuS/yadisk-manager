@@ -228,6 +228,21 @@ def set_save_window_geometry(v: bool) -> None:
     update_config("save_window_geometry", v)
 
 
+# ── Table header state (PLANS 2.11/2.13) ───────────────────
+
+
+def get_table_header_state() -> str:
+    """base64-состояние шапки таблицы (ширины + порядок колонок)."""
+    return load_config().get("table_header_state", "")
+
+
+def set_table_header_state(data: str) -> None:
+    if data:
+        update_config("table_header_state", data)
+    else:
+        remove_config("table_header_state")
+
+
 def get_show_log() -> bool:
     """Показывать ли окно лога при старте."""
     return load_config().get("show_log", False)
