@@ -52,6 +52,7 @@ from ui_shared import (
     _autorun_is_enabled, _autorun_set,
     advance_rotation,
     build_copy_paths_text,
+    build_transfer_notification,
 )
 from ui_braille_spinner import BrailleSpinner as _BrailleSpinner
 from ui_wave_spinner import WaveSpinner as _WaveSpinner
@@ -195,6 +196,11 @@ class MainWindow(QMainWindow):
         self._pending_selection: list | None = None  # выделение для восстановления после async-загрузки
         self._active_threads: list[_WorkerThread] = []
         self._open_after_download: set[str] = set()  # cloud_path файлов для авто-открытия после скачивания
+        # Уведомления о завершённых передачах (PLANS 4.5): копим имена файлов
+        # и показываем одно сообщение трея после затишья
+        self._pending_download_notifs: list[str] = []
+        self._pending_upload_notifs: list[str] = []
+        self._notif_timer = None
         self._toggle_state = None  # legacy — kept for safety
         self._first_close_hint = True  # показать уведомление в трее при первом сворачивании
         self._force_close = False  # True = реальный выход, не сворачивание
@@ -3270,6 +3276,48 @@ class MainWindow(QMainWindow):
         thread.finished.connect(lambda: self._cleanup_thread(thread))
         thread.start()
 
+    # ── Уведомления трея (PLANS 4.5) ───────────────────────
+
+    def _notify(self, title: str, body: str) -> None:
+        """Показать уведомление Windows в трее (если трей есть)."""
+        tray = getattr(self, "_tray", None)
+        if tray is None or not body:
+            return
+        try:
+            show = getattr(tray, "showMessage", None)
+            if callable(show):
+                show(title, body, QSystemTrayIcon.Information, 5000)
+        except Exception:  # noqa: BLE001 — уведомление не должно ломать передачу
+            logger.warning("Не удалось показать уведомление трея")
+
+    def _schedule_transfer_notification(self, cloud_path: str, kind: str) -> None:
+        """Запомнить завершённую передачу и отложить показ уведомления.
+
+        Пачка файлов (bulk-скачивание/загрузка) даёт одно сообщение:
+        таймер перезапускается на каждом файле и показывает сводку
+        через 1.5 с после последнего.
+        """
+        name = os.path.basename(cloud_path.rstrip("/")) or cloud_path
+        if kind == "upload":
+            self._pending_upload_notifs.append(name)
+        else:
+            self._pending_download_notifs.append(name)
+        if self._notif_timer is None:
+            self._notif_timer = QTimer(self)
+            self._notif_timer.setSingleShot(True)
+            self._notif_timer.timeout.connect(self._flush_transfer_notifications)
+        self._notif_timer.start(1500)
+
+    def _flush_transfer_notifications(self) -> None:
+        """Показать накопленные уведомления и очистить очереди."""
+        for names, kind in ((self._pending_download_notifs, "download"),
+                            (self._pending_upload_notifs, "upload")):
+            if not names:
+                continue
+            title, body = build_transfer_notification(names, kind)
+            self._notify(title, body)
+            names.clear()
+
     def _process_result_queue(self):
         """Обработать накопившиеся результаты скачиваний/загрузок (главный поток)."""
         self._process_net_events()
@@ -3348,6 +3396,7 @@ class MainWindow(QMainWindow):
                         5000,
                         lambda cp=cloud_path: self._recently_downloaded.discard(cp)
                     )
+                    self._schedule_transfer_notification(cloud_path, "download")
                     if cloud_path in self._open_after_download:
                         self._open_after_download.discard(cloud_path)
                         self._open_file(local_path)
@@ -3370,6 +3419,7 @@ class MainWindow(QMainWindow):
                     self._hide_progress()
                     self._schedule_toolbar_update()
                     logger.info("Uploaded: %s", cloud_path)
+                    self._schedule_transfer_notification(cloud_path, "upload")
                     # Освобождаем слот и запускаем следующий из очереди
                     self._active_uploads = max(0, self._active_uploads - 1)
                     self._process_upload_queue()

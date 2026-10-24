@@ -316,6 +316,32 @@ def _local_path(cloud_path: str) -> str:
     return os.path.join(_cache_dir(), clean.lstrip("/"))
 
 
+def _plural_files(n: int) -> str:
+    """«1 файл / 2 файла / 5 файлов»."""
+    if 11 <= n % 100 <= 14:
+        return "файлов"
+    if n % 10 == 1:
+        return "файл"
+    if 2 <= n % 10 <= 4:
+        return "файла"
+    return "файлов"
+
+
+def build_transfer_notification(names, kind: str = "download") -> tuple[str, str]:
+    """Текст уведомления трея о завершённых передачах (PLANS 4.5).
+
+    Пачка файлов агрегируется в одно сообщение: bulk-очередь не должна
+    показывать сотню уведомлений подряд.
+    """
+    title = "Скачано" if kind == "download" else "Загружено"
+    if not names:
+        return title, ""
+    if len(names) == 1:
+        return title, names[0]
+    listed = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return title, f"{len(names)} {_plural_files(len(names))}: {listed}"
+
+
 def build_copy_paths_text(items, local_path_fn) -> str:
     """Текст для «Копировать как путь» (PLANS 1.11).
 
