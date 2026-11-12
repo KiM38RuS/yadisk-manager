@@ -28,6 +28,7 @@ build/
 target/
 *.spec
 YaDiskManager.exe
+YaDiskManager_v*.exe
 *.new.exe
 apply_update.bat
 

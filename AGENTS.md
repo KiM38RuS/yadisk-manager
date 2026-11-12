@@ -3,7 +3,7 @@
 > Identity: Python developer, PySide6 GUI, REST API integrations.
 > Language: user speaks Russian, code/replies in Russian or English.
 > Knowledge base root: `D:\\YandexDisk\\Sync\\Coding\\AIWikiVault`
-> Current version: **0.12.6** (see `Backup/` for history)
+> Current version: **0.12.7** (see `Backup/` for history)
 >
 > ## 📦 Версии и бэкапы
 >
@@ -20,6 +20,12 @@
 > - **Артефакты сборки** (`YaDiskManager.exe`, `*.spec`, `*.pyc`, `*.new.exe`, `apply_update.bat`) — **не коммитить**, `.gitignore` или удалять перед коммитом. EXE распространяется через GitHub Releases
 > - **Документация и планы** (`docs/`, `Reference/`, `*.md` в корне, кроме `CHANGELOG.md`, `DESIGN.md`, `README.md`, `AGENTS.md`) — коммитить **не нужно**; это рабочие материалы, не уходят в публичный репозиторий
 > - **Бэкап-исключения**: в `Backup/{ver}/` хранить **только** `.py` и `requirements.txt` — все прочие файлы (`*.bat`, `*.iss`, `.gitignore`, `*.md`, `test_*.py`) **должны удаляться** из бэкапа, а не игнорироваться
+> 
+> **Правило ведения CHANGELOG.md (критичное):**
+> - **Все внесённые изменения — сразу в CHANGELOG.md.** При любом изменении кода/конфига/сборки, которое влияет на поведение, UX, стабильность, установку или обновление — **немедленно** добавить запись в `CHANGELOG.md` в секцию `[Unreleased]` (если её нет — создать в самом верху после заголовка `# Changelog`, перед последней версией). Не откладывать на момент релиза.
+> - **Перед релизом** переместить все записи из `[Unreleased]` в новый раздел `## v{new_ver} (YYYY-MM-DD)`, удалить пустой `[Unreleased]`.
+> - **Формат**: краткие пункты по категориям (`Исправлено`, `Новое`, `Улучшено`, `Изменено`). Критичные фиксы помечать `(критическое)`. Если правка меняет поведение установки/обновления — явно это отражать.
+> - **Цель**: ничего не потерять между версиями. Лог изменений должен быть полным к моменту подготовки релиза.
 >
 > **Процедура синхронизации с GitHub (когда локальный main отстал):**
 > 1. `git fetch origin` — увидеть расхождение
@@ -131,6 +137,7 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 
 Правила:
 - `{ver}` — версия **без** префикса `v`, совпадает с `_version.py` (например, `0.12.2`).
+- **Версии на GitHub должны идти строго по порядку**: следующая версия = предыдущая + одно микро/минорное приращение. Нельзя пропускать номера (например, выпустить `0.12.4` после `0.12.2`). Всегда выпускать **следующую** по порядку версию.
 - **Портативный** ассет обязателен и **не должен содержать `setup`** в имени: апдейтер берёт первый ассет, оканчивающийся на `.exe` и не содержащий `setup` (`updater.py: find_update`).
 - **Установщик** обязан содержать `setup` в имени — иначе апдейтер по ошибке скачает инсталлер вместо портативного exe и «обновит» им приложение.
 - Эти шаблоны нельзя менять без правки `updater.find_update()` — от них зависит авто-обновление.
@@ -151,8 +158,43 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 | 7 | **Собрать инсталлер** | `"D:\Program_files\InnoSetup\ISCC.exe" installer.iss /DMyAppVersion={ver}` → `dist\YaDiskManager_v{ver}_setup.exe` (при заданном `OutputBaseFilename`, см. «📦 Имена ассетов релиза») |
 | 8 | **Git commit + push** | `git add` (`.py`, `.md`, `Backup/`), `git commit`, `git push origin main` |
 | 9 | **Git tag** | `git tag v{ver}`, `git push origin v{ver}` |
-| 10 | **Создать релиз на GitHub** | GitHub → Releases → Draft new release → выбрать тег, загрузить `YaDiskManager_v{ver}_portable.exe` + `YaDiskManager_v{ver}_setup.exe` (см. «📦 Имена ассетов релиза») |
+| 10 | **Создать релиз на GitHub** | `gh release create v{ver} YaDiskManager_v{ver}_portable.exe --prerelease --notes-file release-notes.md` (описание — только текущая версия, на русском; см. ниже) |
 | 11 | **Переименовать сессию** | Переименовать текущую сессию в формат `YaDiskManager v{ver} [описание]`, если среда это поддерживает (см. «🏷️ Именование сессий») |
+
+### 🌐 Создание релиза на GitHub (если `gh` CLI не найден)
+
+**Проблема:** команда `gh` в `PATH`, но в среде вызова (OpenCode) `tail`/`findstr` не подхватываются — `gh --version` может «не найден».
+
+**Проверка:**
+```cmd
+where.exe gh            # показывает путь, если установлен: C:\Program Files\GitHub CLI\gh.exe
+gh --version
+```
+
+**Оформление описания релиза (важно):**
+- Тело релиза — **только изменения текущей версии** (не весь `CHANGELOG.md`, без заголовка `# Changelog` и без секций предыдущих версий).
+- Текст — **на русском**. Первый заголовок — `## v{ver} — краткое описание` (как в релизе v0.11.7), далее пункты изменений этой версии из `CHANGELOG.md`.
+- Подготовить файл заметок (например `release-notes.md`) и передать его в `--notes-file`.
+
+**Если `gh` установлен, но не в PATH:** использовать полный путь:
+```cmd
+"C:\Program Files\GitHub CLI\gh.exe" release create v{ver} \
+    YaDiskManager_v{ver}_portable.exe \
+    --title "v{ver}" \
+    --notes-file release-notes.md \
+    --prerelease
+"C:\Program Files\GitHub CLI\gh.exe" release upload v{ver} dist\YaDiskManager_v{ver}_setup.exe
+```
+
+**Если `gh` НЕ установлен:** создать релиз вручную через браузер:
+1. Открыть https://github.com/KiM38RuS/yadisk-manager/releases/new?tag=v{ver}
+2. Выбрать существующий тег `v{ver}` (или создать из списка)
+3. Включить **This is a pre-release**
+4. Заголовок: `v{ver}`; тело — секция текущей версии из `CHANGELOG.md` (без `# Changelog`, только `## v{ver} — ...` и пункты этой версии, на русском)
+5. Загрузить ассеты: `YaDiskManager_v{ver}_portable.exe` и `YaDiskManager_v{ver}_setup.exe`
+6. Опубликовать релиз
+
+**Авто-обновление:** убедиться, что `UPDATE_REPO = "KiM38RuS/yadisk-manager"` в `updater.py` и галочка беты (`update_beta_enabled`) по умолчанию `True`.
 
 ### 🏷️ Именование сессий
 
