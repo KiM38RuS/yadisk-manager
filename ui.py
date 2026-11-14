@@ -191,6 +191,10 @@ class MainWindow(QMainWindow):
         self._last_good_path = "/"
         self._syncing: set[str] = set()
         self._recently_downloaded: set[str] = set()
+        self._recently_uploaded: set[str] = set()
+        # Файлы, изменённые локально во время upload — на повторную выгрузку
+        # без ложного конфликта (см. _requeue_dirty_uploads)
+        self._dirty_uploads: set[str] = set()
         self._pend_upload: set[str] = set()
         self._recently_deleted: set[str] = set()  # пути, удалённые пользователем (< 30 сек)
         self._pending_selection: list | None = None  # выделение для восстановления после async-загрузки
@@ -2869,8 +2873,13 @@ class MainWindow(QMainWindow):
             self._handle_file_created(local_path)
             return
         cloud_path = rec["cloud_path"]
-        if cloud_path in self._syncing or cloud_path in self._recently_downloaded:
+        if cloud_path in self._recently_downloaded:
             return  # ложное срабатывание после скачивания
+        if cloud_path in self._syncing:
+            # Идёт upload — файл изменён «в полёте»: повторим выгрузку,
+            # когда текущая завершится (без конфликта)
+            self._dirty_uploads.add(cloud_path)
+            return
         # Немедленно показываем syncing
         self._db.set_status(cloud_path, "syncing")
         # НЕ добавляем в self._syncing — _start_upload сделает это
@@ -2888,7 +2897,10 @@ class MainWindow(QMainWindow):
         if rec:
             # Уже известен — значит это изменение, а не создание
             cloud_path = rec["cloud_path"]
-            if cloud_path in self._syncing or cloud_path in self._recently_downloaded:
+            if cloud_path in self._recently_downloaded:
+                return
+            if cloud_path in self._syncing:
+                self._dirty_uploads.add(cloud_path)
                 return
             self._register_new_file(local_path, cloud_path)
             QTimer.singleShot(2000, lambda: self._flush_pending_upload())
@@ -2961,6 +2973,15 @@ class MainWindow(QMainWindow):
         self._db.set_downloaded(new_cloud, dst_path,
                                 last_sync_md5=old_rec.get("last_sync_md5", ""))
         self._navigate_to_folder(self._current_path)
+
+    def _requeue_dirty_uploads(self) -> None:
+        """Файлы, изменённые во время upload, — на повторную выгрузку без конфликта."""
+        if not self._dirty_uploads:
+            return
+        for cp in list(self._dirty_uploads):
+            self._dirty_uploads.discard(cp)
+            self._pend_upload.add(cp)
+        QTimer.singleShot(0, self._flush_pending_upload)
 
     def _flush_pending_upload(self):
         if not self._pend_upload:
@@ -3185,10 +3206,9 @@ class MainWindow(QMainWindow):
         def on_progress(done, total):
             QTimer.singleShot(0, lambda d=done, t=total: _ui_progress(d, t))
 
-        def on_finished(cp):
+        def on_finished(cp, sent_md5):
             """Выполняется в рабочем потоке — кладём результат в потокобезопасную очередь."""
-            local_md5 = _md5_file(local_path)
-            self._download_results.put((cp, local_path, local_md5, "upload", False))
+            self._download_results.put((cp, local_path, sent_md5, "upload", False))
 
         def on_error(msg):
             logger.warning("Worker error: upload %s — %s", cloud_path, msg)
@@ -3404,25 +3424,41 @@ class MainWindow(QMainWindow):
                     self._active_downloads = max(0, self._active_downloads - 1)
                     self._process_download_queue()
                 elif action == "upload":
+                    sent_md5 = md5  # MD5 байт, реально отправленных в облако
                     self._db.upsert_file(
                         cloud_path=cloud_path,
                         name=Path(cloud_path).name,
                         type_="file",
                         size=os.path.getsize(local_path),
                         modified=datetime.now(timezone.utc).isoformat(),
-                        md5=md5,
+                        md5=sent_md5,
                     )
-                    self._db.set_downloaded(cloud_path, local_path, last_sync_md5=md5)
+                    self._db.set_downloaded(cloud_path, local_path,
+                                            last_sync_md5=sent_md5)
                     self._syncing.discard(cloud_path)
                     self.table_model.update_status(cloud_path, "downloaded")
                     self._update_tree_status(cloud_path)
                     self._hide_progress()
                     self._schedule_toolbar_update()
                     logger.info("Uploaded: %s", cloud_path)
+                    # Пока файл «свежий» в облаке — не считаем его изменённым
+                    # локально (защита от поздних событий watcher)
+                    self._recently_uploaded.add(cloud_path)
+                    QTimer.singleShot(
+                        30000,
+                        lambda cp=cloud_path: self._recently_uploaded.discard(cp)
+                    )
+                    # Файл изменился, пока шёл upload → нужен повтор без конфликта
+                    if os.path.exists(local_path) and \
+                            _md5_file(local_path) != sent_md5:
+                        self._dirty_uploads.add(cloud_path)
                     self._schedule_transfer_notification(cloud_path, "upload")
                     # Освобождаем слот и запускаем следующий из очереди
                     self._active_uploads = max(0, self._active_uploads - 1)
                     self._process_upload_queue()
+                    # Повторную выгрузку «грязных» файлов планируем на потом:
+                    # сначала должны быть записаны метаданные текущего upload
+                    QTimer.singleShot(0, self._requeue_dirty_uploads)
                     # Если файл в текущей папке — обновляем вид
                     if hasattr(self, '_current_path') and self._current_path:
                         parent = "/".join(cloud_path.rstrip("/").split("/")[:-1]) or "/"
