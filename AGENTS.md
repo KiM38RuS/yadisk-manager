@@ -161,15 +161,39 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 | 10 | **Создать релиз на GitHub** | `gh release create v{ver} YaDiskManager_v{ver}_portable.exe --prerelease --notes-file release-notes.md` (описание — только текущая версия, на русском; см. ниже) |
 | 11 | **Переименовать сессию** | Переименовать текущую сессию в формат `YaDiskManager v{ver} [описание]`, если среда это поддерживает (см. «🏷️ Именование сессий») |
 
+### 🖥️ Окружение агента (shell)
+
+**Shell в OpenCode — PowerShell, а не bash.** Часть привычных приёмов не работает:
+
+| Не работает | Симптом |
+|---|---|
+| `команда \| tail -N` / `\| grep` / `\| findstr` | `CommandNotFoundException: "tail" не является ...`; падает вся цепочка |
+| `команда1 && команда2` | `ParserError: "&&" не является допустимым разделителем` |
+
+**Рабочие приёмы:**
+- один вызов = одна команда, без пайпов и `&&`; несколько действий — несколько отдельных вызовов
+- нужен полный вывод → перенаправить в файл и прочитать его: `python script.py > out.txt 2>&1`
+- сложная логика/многострочный текст → записать `.py` через write в `C:\Users\KiM38RuS\AppData\Local\Temp\opencode\` и запустить `python script.py`
+- `gh` при прямом вызове (без пайпов) работает; при проблемах — полный путь: `"C:\Program Files\GitHub CLI\gh.exe"`
+
+**`git` и `.git/index.lock`:** если `git commit` падает с `Unable to create '.../.git/index.lock': File exists` — предыдущий git-процесс упал. Убедиться, что git не запущен, удалить `.git/index.lock`, повторить команду.
+
 ### 🌐 Создание релиза на GitHub (если `gh` CLI не найден)
 
-**Проблема:** команда `gh` в `PATH`, но в среде вызова (OpenCode) `tail`/`findstr` не подхватываются — `gh --version` может «не найден».
+**Проблема:** `gh` установлен и авторизован, но команды вида `gh ... | tail -N` падают в PowerShell (см. «🖥️ Окружение агента (shell)») — создаётся впечатление, что `gh` «не найден».
 
 **Проверка:**
 ```cmd
 where.exe gh            # показывает путь, если установлен: C:\Program Files\GitHub CLI\gh.exe
 gh --version
+gh auth status          # аккаунт KiM38RuS, scope repo
 ```
+
+**Нюансы `gh` (проверено на v0.12.7):**
+- Тег должен быть на origin **до** создания релиза: `git push origin v{ver}`. Иначе `gh release create` падает с `tag v{ver} exists locally but has not been pushed`.
+- Флаг pre-release в JSON называется `isPrerelease` (не `prerelease`): `gh release view v{ver} --json isPrerelease,assets`.
+- Проверка ассетов: `gh release view v{ver} --json assets --jq '.assets[].name'`.
+- Правка только описания: подготовить файл заметок и выполнить `gh release edit v{ver} --notes-file release-notes.md`.
 
 **Оформление описания релиза (важно):**
 - Тело релиза — **только изменения текущей версии** (не весь `CHANGELOG.md`, без заголовка `# Changelog` и без секций предыдущих версий).
