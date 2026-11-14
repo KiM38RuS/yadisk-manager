@@ -107,14 +107,17 @@ class UploadWorker(QObject):
     """Загружает файл в облако в фоновом потоке с отчётом прогресса.
 
     Сигналы:
-      - finished(cloud_path)   — успех
+      - finished(cloud_path, uploaded_md5) — успех; uploaded_md5 — MD5
+                                  реально отправленных байт (то, что ушло
+                                  в PUT, а не содержимое файла на диске
+                                  на момент завершения).
       - error(error_msg)       — обычная ошибка
       - locked(cloud_path)     — файл открыт в редакторе и не может быть
                                   прочитан/перезаписан; UI пометит его
                                   иконкой close-ellipse-red.svg.
     """
     progress = Signal(int, int)    # uploaded, total
-    finished = Signal(str)         # cloud_path
+    finished = Signal(str, str)    # cloud_path, uploaded_md5
     error = Signal(str)
     conflict = Signal(str, str, str)  # cloud_path, local_md5, cloud_md5
     locked = Signal(str)           # cloud_path
@@ -163,6 +166,7 @@ class UploadWorker(QObject):
         """Выполнить PUT-запрос с данными файла по href."""
         total = os.path.getsize(self.local_path)
         uploaded = 0
+        h = hashlib.md5()  # MD5 реально отправленных байт
 
         def gen_chunks():
             nonlocal uploaded
@@ -175,6 +179,7 @@ class UploadWorker(QObject):
                     if not chunk:
                         break
                     uploaded += len(chunk)
+                    h.update(chunk)
                     self.progress.emit(uploaded, total)
                     yield chunk
 
@@ -182,7 +187,7 @@ class UploadWorker(QObject):
                                    timeout=300) as resp:
             resp.raise_for_status()
         if not self._cancelled:
-            self.finished.emit(self.cloud_path)
+            self.finished.emit(self.cloud_path, h.hexdigest())
         else:
             raise IOError("upload cancelled")
 
