@@ -622,7 +622,8 @@ class Database:
                 self._conn.rollback()
                 raise
 
-    def sync_children_from_api(self, parent_path: str, api_items: list[dict]) -> None:
+    def sync_children_from_api(self, parent_path: str,
+                               api_items: list[dict]) -> list[dict]:
         """Синхронизировать БД с ответом API.
 
         Удаляет из БД файлы/папки, которые есть в parent_path,
@@ -631,6 +632,12 @@ class Database:
 
         Предотвращает ситуацию, когда удалённые из облака файлы
         навсегда остаются в БД и показываются при _load_folder_local.
+
+        Возвращает список локально скачанных файлов (type='file'), которые
+        исчезли из облака, но остались на диске: записи вида
+        {"cloud_path", "local_path", "md5", "last_sync_md5", "type"}.
+        Сами записи в БД не удаляются — вызывающий код решает, что с ними
+        делать (например, перевести в offline-режим).
         """
         now = _now()
         api_paths = {item["path"] for item in api_items}
@@ -661,6 +668,23 @@ class Database:
                 """, (len(prefix) + 2, len(prefix) + 2, len(prefix) + 2,
                       pattern, parent_path)).fetchall()
                 protected_dirs = {r[0] for r in protected_rows}
+
+                # === Шаг 1b: локально скачанные файлы, которых нет в API.
+                # Записи НЕ удаляем — возвращаем вызывающему коду
+                # (Tasks 5–6 переводят их в offline-режим).
+                vanished_rows = self._conn.execute("""\
+                    SELECT cloud_path, local_path, md5, last_sync_md5, type
+                    FROM files
+                    WHERE cloud_path LIKE ? ESCAPE '\\'
+                      AND cloud_path != ?
+                      AND cloud_path NOT LIKE ? ESCAPE '\\'
+                      AND status != 'syncing'
+                      AND type = 'file'
+                      AND local_path IS NOT NULL AND local_path != ''
+                """, (pattern, parent_path, pattern + "/%")).fetchall()
+                vanished = [dict(r) for r in vanished_rows
+                            if r["cloud_path"] not in api_paths
+                            and r["cloud_path"] not in protected_dirs]
 
                 # === Шаг 2: находим детей для удаления (нет в API, не syncing,
                 # нет local_path, не защищённая папка)
@@ -721,6 +745,8 @@ class Database:
 
         # Инвалидируем кеш для parent_path и его предков
         self.invalidate_folder_cache(parent_path)
+
+        return vanished
 
     def _ensure_missing_dirs(self, parent_path: str):
         """Создать записи папок для файлов с local_path, у которых
