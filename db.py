@@ -673,7 +673,7 @@ class Database:
                 # Записи НЕ удаляем — возвращаем вызывающему коду
                 # (Tasks 5–6 переводят их в offline-режим).
                 vanished_rows = self._conn.execute("""\
-                    SELECT cloud_path, local_path, md5, last_sync_md5, type
+                    SELECT cloud_path, local_path, md5, last_sync_md5, type, status
                     FROM files
                     WHERE cloud_path LIKE ? ESCAPE '\\'
                       AND cloud_path != ?
@@ -989,7 +989,7 @@ class Database:
     def get_local_files_not_in(self, cloud_paths: set[str]) -> list[dict]:
         """Все файлы с локальной копией, отсутствующие в облачном списке."""
         rows = self._read_conn.execute("""
-            SELECT cloud_path, local_path, md5, last_sync_md5 FROM files
+            SELECT cloud_path, local_path, md5, last_sync_md5, status FROM files
             WHERE type='file' AND local_path IS NOT NULL AND local_path != ''
             ORDER BY cloud_path ASC
         """).fetchall()

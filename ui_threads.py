@@ -522,6 +522,12 @@ class VanishedResolveThread(QThread):
                     continue
                 local_md5 = _md5_file(lp)
                 last_sync = rec.get("last_sync_md5") or row.get("last_sync_md5") or ""
+                # status="modified" — пользователь уже решил оставить локальную
+                # версию (или её не удалось выгрузить): не превращаем в delete.
+                if rec.get("status") == "modified" or row.get("status") == "modified":
+                    actions.append({"action": "conflict", "cloud_path": cp,
+                                    "local_path": lp, "local_md5": local_md5})
+                    continue
                 if last_sync and local_md5 != last_sync:
                     actions.append({"action": "conflict", "cloud_path": cp,
                                     "local_path": lp, "local_md5": local_md5})

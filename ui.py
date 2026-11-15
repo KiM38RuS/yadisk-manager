@@ -4592,7 +4592,19 @@ class MainWindow(QMainWindow):
                     local_md5 = action.get("local_md5", "")
                     new_local = _local_path(new_cloud)
                     os.makedirs(os.path.dirname(new_local), exist_ok=True)
-                    os.replace(local_path, new_local)
+                    if os.path.exists(new_local):
+                        # Не перезаписываем чужой файл: цель могла быть создана
+                        # другой программой/ПК между сканом и разрешением.
+                        existing_md5 = _md5_file(new_local)
+                        if existing_md5 != local_md5:
+                            logger.warning(
+                                "Vanished move: destination %s already exists "
+                                "with different content — keeping both files "
+                                "(source %s)", new_local, local_path)
+                            continue
+                        os.remove(local_path)  # копия уже на месте
+                    else:
+                        os.replace(local_path, new_local)
                     old_rec = self._db.get_file(cloud_path) or {}
                     if not self._db.get_file(new_cloud):
                         self._db.upsert_file(
@@ -4618,21 +4630,26 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.warning("Vanished resolve failed for %s: %s", cloud_path, e)
 
-        if affected:
-            parents = {os.path.dirname(cp.rstrip("/")) or "/" for cp in affected}
-            for cp in affected:
-                try:
-                    self._update_tree_status(cp)
-                except Exception:
-                    pass  # дерево может быть ещё не построено
-            current = getattr(self, "_current_path", "") or ""
-            if current in parents:
-                self._refresh_folder_view()
-
-        pending = list(self._vanished_pending)
-        self._vanished_pending.clear()
-        if pending:
-            self._start_vanished_resolve(pending)
+        try:
+            if affected:
+                parents = {os.path.dirname(cp.rstrip("/")) or "/"
+                           for cp in affected}
+                for cp in affected:
+                    try:
+                        self._update_tree_status(cp)
+                    except Exception:
+                        pass  # дерево может быть ещё не построено
+                current = getattr(self, "_current_path", "") or ""
+                if current in parents:
+                    self._refresh_folder_view()
+        except Exception as e:
+            logger.warning("Vanished resolve: view refresh failed: %s", e)
+        finally:
+            # Очередь должна разбираться всегда — иначе механизм встанет навсегда.
+            pending = list(self._vanished_pending)
+            self._vanished_pending.clear()
+            if pending:
+                self._start_vanished_resolve(pending)
 
     def _handle_remote_delete_conflict(self, cloud_path: str,
                                        local_path: str) -> None:
@@ -4655,6 +4672,9 @@ class MainWindow(QMainWindow):
         if keep_local:
             logger.info("Remote delete conflict: keeping local copy %s", cloud_path)
             self._db.update_last_sync_md5(cloud_path, "")
+            # Гарантия, что следующий проход разрешения не удалит файл:
+            # status="modified" переводит запись в conflict (см. VanishedResolveThread).
+            self._db.set_status(cloud_path, "modified")
             self._pend_upload.add(cloud_path)
             QTimer.singleShot(0, self._flush_pending_upload)
             return

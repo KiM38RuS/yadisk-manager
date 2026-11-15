@@ -62,3 +62,15 @@ def test_new_cloud_file_with_same_md5_becomes_move(qapp, in_memory_db, tmp_path)
     out = _run(in_memory_db, [{"cloud_path": "/photos/old.jpg"}])
     assert out[0]["action"] == "move"
     assert out[0]["new_cloud_path"] == "/photos/new.jpg"
+
+
+def test_modified_status_conflicts_even_without_last_sync(qapp, in_memory_db,
+                                                          tmp_path):
+    """Решение «оставить локальную версию» не должно откатываться в delete."""
+    lp, md5 = _seed(in_memory_db, tmp_path)
+    in_memory_db.set_status("/photos/old.jpg", "modified")
+    in_memory_db.update_last_sync_md5("/photos/old.jpg", "")
+    out = _run(in_memory_db, [{"cloud_path": "/photos/old.jpg",
+                               "local_path": str(lp),
+                               "last_sync_md5": "", "status": "modified"}])
+    assert out[0]["action"] == "conflict"
