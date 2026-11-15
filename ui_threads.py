@@ -8,6 +8,7 @@
 import hashlib
 import logging
 import os
+import posixpath
 import shutil
 from datetime import datetime, timezone
 
@@ -482,6 +483,65 @@ class RecentFilesThread(QThread):
             self.finished.emit(items)
         except Exception:
             self.finished.emit([])
+
+
+class VanishedResolveThread(QThread):
+    """Фоновый поток разрешения файлов, исчезнувших в облаке.
+
+    Для каждой записи, которую вернул `sync_children_from_api` (файл был
+    скачан локально, но пропал из облака), решает, что делать:
+
+      * ``drop``     — локальной копии нет: запись в БД больше не нужна;
+      * ``delete``   — локальная копия не менялась: файл удалён в облаке;
+      * ``move``     — рядом появился облачный файл с тем же MD5: переименование;
+      * ``conflict`` — локальная копия изменена: решает пользователь.
+
+    Работает с БД в фоне, поэтому тяжёлый MD5 не блокирует UI.
+    """
+    finished = Signal(list)
+
+    def __init__(self, api, database, vanished: list[dict], parent=None):
+        super().__init__(parent)
+        self._api = api
+        self._database = database
+        self._vanished = vanished or []
+
+    def run(self):
+        actions: list[dict] = []
+        for rec in self._vanished:
+            try:
+                cp = rec.get("cloud_path") or ""
+                if not cp:
+                    continue
+                # Запись из sync_children_from_api уже содержит local_path/хеши,
+                # но при вызове вручную достаточно одного cloud_path — добираем из БД.
+                row = self._database.get_file(cp) or {}
+                lp = rec.get("local_path") or row.get("local_path") or ""
+                if not lp or not os.path.exists(lp):
+                    actions.append({"action": "drop", "cloud_path": cp})
+                    continue
+                local_md5 = _md5_file(lp)
+                last_sync = rec.get("last_sync_md5") or row.get("last_sync_md5") or ""
+                if last_sync and local_md5 != last_sync:
+                    actions.append({"action": "conflict", "cloud_path": cp,
+                                    "local_path": lp, "local_md5": local_md5})
+                    continue
+                parent = posixpath.dirname(cp) or "/"
+                match = self._database.find_file_by_md5(
+                    local_md5, parent_path=parent, exclude_path=cp)
+                if match:
+                    actions.append({"action": "move", "cloud_path": cp,
+                                    "local_path": lp,
+                                    "new_cloud_path": match["cloud_path"],
+                                    "local_md5": local_md5})
+                else:
+                    actions.append({"action": "delete", "cloud_path": cp,
+                                    "local_path": lp})
+            except Exception as e:
+                logger.warning("VanishedResolveThread: %s — %s",
+                               rec.get("cloud_path", "?"), e)
+                continue
+        self.finished.emit(actions)
 
 
 class SearchThread(QThread):

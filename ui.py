@@ -73,6 +73,7 @@ from ui_threads import (
     AllFilesThread as _AllFilesThread,
     FolderDownloadThread as _FolderDownloadThread,
     RecentFilesThread as _RecentFilesThread,
+    VanishedResolveThread as _VanishedResolveThread,
     SearchThread as _SearchThread,
     MetaFetchThread as _MetaFetchThread,
     StartupScanThread as _StartupScanThread,
@@ -200,6 +201,10 @@ class MainWindow(QMainWindow):
         self._upload_stamps: dict[str, tuple[int, int]] = {}
         self._pend_upload: set[str] = set()
         self._recently_deleted: set[str] = set()  # пути, удалённые пользователем (< 30 сек)
+        # Разрешение файлов, исчезнувших в облаке (см. VanishedResolveThread):
+        # флаг «поток уже идёт» + очередь записей, пришедших во время работы
+        self._vanished_thread_running = False
+        self._vanished_pending: list[dict] = []
         self._pending_selection: list | None = None  # выделение для восстановления после async-загрузки
         self._active_threads: list[_WorkerThread] = []
         self._open_after_download: set[str] = set()  # cloud_path файлов для авто-открытия после скачивания
@@ -4531,6 +4536,139 @@ class MainWindow(QMainWindow):
                 self._load_folder_async(self._current_path)
         except Exception as e:
             logger.warning("Poll error: %s", e)
+
+    # ── Разрешение исчезнувших в облаке файлов ────────────
+
+    def _start_vanished_resolve(self, vanished: list[dict]) -> None:
+        """Запустить фоновое разрешение скачанных файлов, пропавших из облака.
+
+        Вызывается из навигации и полного обхода (Task 6). Пока поток уже
+        работает, новые записи копятся в `_vanished_pending` и запускаются
+        следующим проходом — так не плодим параллельные потоки на каждый клик.
+        """
+        if not vanished:
+            return
+        if self._vanished_thread_running:
+            self._vanished_pending.extend(vanished)
+            return
+        self._vanished_thread_running = True
+        thread = _VanishedResolveThread(self._api, self._db, vanished, self)
+        thread.finished.connect(self._on_vanished_resolved)
+        thread.finished.connect(thread.deleteLater)
+        self._active_threads.append(thread)
+        thread.finished.connect(lambda: self._cleanup_thread(thread))
+        thread.start()
+
+    def _on_vanished_resolved(self, actions: list[dict]) -> None:
+        """Применить решения VanishedResolveThread (UI-поток)."""
+        self._vanished_thread_running = False
+        recent = getattr(self, "_recently_uploaded", None) or set()
+        affected: list[str] = []
+
+        for action in actions or []:
+            cloud_path = action.get("cloud_path") or ""
+            if not cloud_path:
+                continue
+            # Файл только что выгружен нами — облако ещё не успело обновиться.
+            if cloud_path in recent:
+                continue
+            if (action.get("action") == "move"
+                    and action.get("new_cloud_path") in recent):
+                continue
+            try:
+                kind = action.get("action")
+                if kind == "drop":
+                    self._db.remove_file(cloud_path)
+                elif kind == "delete":
+                    local_path = action.get("local_path") or _local_path(cloud_path)
+                    if local_path and os.path.exists(local_path):
+                        os.remove(local_path)
+                    self._db.remove_file(cloud_path)
+                    logger.info("Vanished file deleted (unchanged locally): %s",
+                                cloud_path)
+                elif kind == "move":
+                    new_cloud = action.get("new_cloud_path") or ""
+                    local_path = action.get("local_path") or _local_path(cloud_path)
+                    local_md5 = action.get("local_md5", "")
+                    new_local = _local_path(new_cloud)
+                    os.makedirs(os.path.dirname(new_local), exist_ok=True)
+                    os.replace(local_path, new_local)
+                    old_rec = self._db.get_file(cloud_path) or {}
+                    if not self._db.get_file(new_cloud):
+                        self._db.upsert_file(
+                            new_cloud, os.path.basename(new_cloud.rstrip("/")),
+                            "file", size=old_rec.get("size", 0),
+                            modified=old_rec.get("modified", ""),
+                            md5=local_md5,
+                        )
+                    self._db.remove_file(cloud_path)
+                    self._db.set_downloaded(new_cloud, new_local,
+                                            last_sync_md5=local_md5)
+                    logger.info("Vanished file relocated locally: %s → %s",
+                                cloud_path, new_cloud)
+                elif kind == "conflict":
+                    local_path = action.get("local_path") or _local_path(cloud_path)
+                    # Вызов через класс: метод должен работать и когда окно
+                    # подменено заглушкой (тесты), иначе вызов уйдёт в никуда.
+                    MainWindow._handle_remote_delete_conflict(
+                        self, cloud_path, local_path)
+                else:
+                    continue
+                affected.append(cloud_path)
+            except Exception as e:
+                logger.warning("Vanished resolve failed for %s: %s", cloud_path, e)
+
+        if affected:
+            parents = {os.path.dirname(cp.rstrip("/")) or "/" for cp in affected}
+            for cp in affected:
+                try:
+                    self._update_tree_status(cp)
+                except Exception:
+                    pass  # дерево может быть ещё не построено
+            current = getattr(self, "_current_path", "") or ""
+            if current in parents:
+                self._refresh_folder_view()
+
+        pending = list(self._vanished_pending)
+        self._vanished_pending.clear()
+        if pending:
+            self._start_vanished_resolve(pending)
+
+    def _handle_remote_delete_conflict(self, cloud_path: str,
+                                       local_path: str) -> None:
+        """Файл удалён в облаке, но изменён на компьютере — спросить пользователя.
+
+        «Оставить» → сбрасываем last_sync_md5 и ставим файл в очередь загрузки:
+        он вернётся в облако как новая версия.
+        """
+        keep_local = QGuiApplication.platformName() == "offscreen"
+        if not keep_local:
+            answer = QMessageBox.question(
+                self, "Файл удалён в облаке",
+                "Файл удалён в облаке, но изменён на компьютере.\n\n"
+                f"{cloud_path}\n\n"
+                "Оставить локальную версию и загрузить её снова?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            keep_local = answer == QMessageBox.Yes
+
+        if keep_local:
+            logger.info("Remote delete conflict: keeping local copy %s", cloud_path)
+            self._db.update_last_sync_md5(cloud_path, "")
+            self._pend_upload.add(cloud_path)
+            QTimer.singleShot(0, self._flush_pending_upload)
+            return
+
+        try:
+            if local_path and os.path.exists(local_path):
+                os.remove(local_path)
+        except OSError as e:
+            logger.warning("Remote delete conflict: cannot remove %s — %s",
+                           local_path, e)
+            return
+        self._db.remove_file(cloud_path)
+        logger.info("Remote delete conflict: local copy deleted %s", cloud_path)
+        self._refresh_folder_view()
 
     # ── Действия ──────────────────────────────────────────
 
