@@ -195,6 +195,9 @@ class MainWindow(QMainWindow):
         # Файлы, изменённые локально во время upload — на повторную выгрузку
         # без ложного конфликта (см. _requeue_dirty_uploads)
         self._dirty_uploads: set[str] = set()
+        # Снимок (size, mtime_ns) на момент старта upload — дешёвая проверка,
+        # изменился ли файл за время выгрузки (без хеширования в UI-потоке)
+        self._upload_stamps: dict[str, tuple[int, int]] = {}
         self._pend_upload: set[str] = set()
         self._recently_deleted: set[str] = set()  # пути, удалённые пользователем (< 30 сек)
         self._pending_selection: list | None = None  # выделение для восстановления после async-загрузки
@@ -3192,6 +3195,13 @@ class MainWindow(QMainWindow):
     def _do_upload(self, cloud_path: str, local_path: str,
                    local_md5: str):
         """Реально запустить upload-воркер (без проверки лимита)."""
+        # Снимок метаданных до старта: после завершения сравним — если файл
+        # изменился, его нужно выгрузить повторно (сравнение дешёвое, без хеша)
+        try:
+            st = os.stat(local_path)
+            self._upload_stamps[cloud_path] = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            self._upload_stamps.pop(cloud_path, None)
         worker = UploadWorker(self._api, local_path, cloud_path)
 
         self._show_progress_localized(f"Загружаю {Path(cloud_path).name}")
@@ -3233,6 +3243,10 @@ class MainWindow(QMainWindow):
             return
 
         self._syncing.add(cloud_path)
+        # Идёт скачивание — события watcher по этому файлу игнорируем,
+        # чтобы не принять запись DownloadWorker за локальную правку (и не
+        # пометить файл «грязным» до того, как обновится last_sync_md5)
+        self._recently_downloaded.add(cloud_path)
         # Сразу показываем статус 🔄 в таблице
         self.table_model.update_status(cloud_path, "syncing")
         # Показываем статус 🔄 в дереве для родительской папки
@@ -3378,9 +3392,13 @@ class MainWindow(QMainWindow):
                     self._schedule_toolbar_update()
                     logger.warning("Worker error: %s %s — reset to cloud_only", action, cloud_path)
                     if action == "upload":
+                        self._upload_stamps.pop(cloud_path, None)
                         self._active_uploads = max(0, self._active_uploads - 1)
                         self._process_upload_queue()
                     elif action == "download":
+                        # Неудачное скачивание не должно навсегда подавлять
+                        # события watcher по этому файлу
+                        self._recently_downloaded.discard(cloud_path)
                         self._active_downloads = max(0, self._active_downloads - 1)
                         self._process_download_queue()
                     continue
@@ -3448,9 +3466,20 @@ class MainWindow(QMainWindow):
                         30000,
                         lambda cp=cloud_path: self._recently_uploaded.discard(cp)
                     )
-                    # Файл изменился, пока шёл upload → нужен повтор без конфликта
-                    if os.path.exists(local_path) and \
-                            _md5_file(local_path) != sent_md5:
+                    # Файл изменился, пока шёл upload → нужен повтор без конфликта.
+                    # Сначала дешёвое сравнение снимка stat; хешируем только если
+                    # stat изменился (или снимка нет), чтобы не замораживать UI
+                    # на каждом завершении большой выгрузки.
+                    stamp = self._upload_stamps.pop(cloud_path, None)
+                    unchanged = False
+                    try:
+                        st = os.stat(local_path)
+                        unchanged = (stamp is not None
+                                     and (st.st_size, st.st_mtime_ns) == stamp)
+                    except OSError:
+                        unchanged = False
+                    if not unchanged and os.path.exists(local_path) \
+                            and _md5_file(local_path) != sent_md5:
                         self._dirty_uploads.add(cloud_path)
                     self._schedule_transfer_notification(cloud_path, "upload")
                     # Освобождаем слот и запускаем следующий из очереди
@@ -3467,6 +3496,8 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.error("_process_result_queue failed: %s", e, exc_info=True)
                 self._syncing.discard(cloud_path)
+                self._recently_downloaded.discard(cloud_path)
+                self._upload_stamps.pop(cloud_path, None)
                 self._hide_progress()
             finally:
                 try:
@@ -3586,6 +3617,7 @@ class MainWindow(QMainWindow):
                 self._do_download(cp, lp)
             else:
                 logger.debug("_process_download_queue: skipping cancelled %s", cp)
+                self._recently_downloaded.discard(cp)
 
     def _process_upload_queue(self):
         """Запустить следующую загрузку из очереди, если есть свободные слоты."""
