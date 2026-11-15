@@ -966,6 +966,36 @@ class Database:
             """).fetchall()
         return [dict(r) for r in rows]
 
+    def find_file_by_md5(self, md5: str, parent_path: str | None = None,
+                         exclude_path: str | None = None) -> Optional[dict]:
+        """Найти облачную запись (без локальной копии) по MD5 — для сопоставления перемещений."""
+        if not md5:
+            return None
+        sql = ("SELECT * FROM files WHERE type='file' AND md5=? "
+               "AND (local_path IS NULL OR local_path='')")
+        params: list = [md5]
+        if parent_path is not None:
+            pattern = _like_children_pattern(parent_path.rstrip("/"))
+            sql += (" AND cloud_path LIKE ? ESCAPE '\\'"
+                    " AND cloud_path NOT LIKE ? ESCAPE '\\'")
+            params.extend([pattern, pattern + "/%"])
+        if exclude_path:
+            sql += " AND cloud_path != ?"
+            params.append(exclude_path)
+        sql += " ORDER BY cloud_path ASC LIMIT 1"
+        row = self._read_conn.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    def get_local_files_not_in(self, cloud_paths: set[str]) -> list[dict]:
+        """Все файлы с локальной копией, отсутствующие в облачном списке."""
+        rows = self._read_conn.execute("""
+            SELECT cloud_path, local_path, md5, last_sync_md5 FROM files
+            WHERE type='file' AND local_path IS NOT NULL AND local_path != ''
+            ORDER BY cloud_path ASC
+        """).fetchall()
+        return [dict(r) for r in rows
+                if r["cloud_path"].rstrip("/") not in cloud_paths]
+
     def get_by_status(self, status: str) -> list[dict]:
         """Файлы по статусу."""
         with self._lock:
