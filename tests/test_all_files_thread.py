@@ -254,13 +254,24 @@ class TestAllFilesThreadVanished(unittest.TestCase):
             return [{"path": "/keep.txt", "name": "keep.txt", "type": "file"}]
         return []
 
-    def _run(self):
-        self.api.get_all_files_page.side_effect = self._page_for
+    def _run(self, page_for=None):
+        self.api.get_all_files_page.side_effect = page_for or self._page_for
         thread = ui_threads.AllFilesThread(self.api, self.database)
         out = []
         thread.vanished.connect(out.extend)
         thread.run()
         return out
+
+    @staticmethod
+    def _item(offset):
+        return {"path": f"/file_{offset}.txt", "name": f"file_{offset}.txt",
+                "type": "file"}
+
+    def _serve(self, non_empty_offsets):
+        """Страницы непустые только для указанных offset (4 параллельных запроса)."""
+        def page_for(limit, offset):
+            return [self._item(offset)] if offset in non_empty_offsets else []
+        return page_for
 
     def test_emits_vanished_after_full_scan(self):
         """Скан с нуля загрузил хотя бы страницу — исчезнувший файл отдан в UI."""
@@ -270,13 +281,41 @@ class TestAllFilesThreadVanished(unittest.TestCase):
         self.database.get_local_files_not_in.assert_called_once()
 
     def test_does_not_emit_when_resumed(self):
-        """Докачка с сохранённого offset — список неполный, vanished не эмитится."""
+        """Докачка с сохранённого offset — список неполный, vanished не эмитится.
+
+        Скан реально загружает страницу (loaded > 0), поэтому тест падает,
+        если из guard'а убрать проверку started_at_zero.
+        """
         self._mock_get_offset.return_value = 500
 
-        out = self._run()
+        out = self._run(self._serve({500}))
 
         self.assertEqual(out, [])
         self.database.get_local_files_not_in.assert_not_called()
+
+    def test_does_not_emit_when_listing_looks_truncated(self):
+        """Непустая страница ПОСЛЕ пустой = список оборван — vanished не эмитится.
+
+        Пустая страница на offset=500 при непустой на 1000 означает, что API
+        отдал неполный список: судить об исчезнувших файлах нельзя, иначе все
+        локальные копии с offset >= 1000 были бы удалены.
+        """
+        out = self._run(self._serve({0, 1000}))
+
+        self.assertEqual(out, [])
+        self.database.get_local_files_not_in.assert_not_called()
+
+    def test_accumulates_cloud_paths_across_batches(self):
+        """Много батчей: в get_local_files_not_in уходит объединение всех путей."""
+        out = self._run(self._serve({0, 500, 1000, 1500, 2000}))
+
+        self.assertEqual([r["cloud_path"] for r in out], ["/gone.txt"])
+        self.database.get_local_files_not_in.assert_called_once()
+        sent = self.database.get_local_files_not_in.call_args.args[0]
+        self.assertEqual(
+            sent,
+            {f"/file_{off}.txt" for off in (0, 500, 1000, 1500, 2000)},
+        )
 
     def test_does_not_emit_on_empty_first_page(self):
         """Пустой первый ответ API — не повод объявлять все локальные файлы исчезнувшими."""

@@ -369,12 +369,23 @@ class AllFilesThread(QThread):
 
             # Обрабатываем страницы по порядку — при пустой странице останавливаемся
             any_inserted = False
-            for off, page in results:
+            for idx, (off, page) in enumerate(results):
                 if not page:
                     # Пустая страница = конец списка
+                    # Непустая страница ПОСЛЕ пустой означает, что API отдал
+                    # неполный список: судить об исчезнувших файлах нельзя,
+                    # иначе все локальные копии с больших offset'ов ушли бы
+                    # в резолвер и, скорее всего, были бы удалены.
+                    truncated = any(
+                        later_page for _, later_page in results[idx + 1:])
                     db.set_all_files_offset(0)
                     logger.info("AllFilesThread: %d files loaded", loaded)
-                    self._emit_vanished(cloud_paths, started_at_zero, loaded)
+                    if truncated:
+                        logger.warning(
+                            "AllFilesThread: non-empty page after empty page "
+                            "— listing looks truncated, skipping vanished check")
+                    else:
+                        self._emit_vanished(cloud_paths, started_at_zero, loaded)
                     self.finished.emit(loaded)
                     return
                 # Сохраняем в БД
