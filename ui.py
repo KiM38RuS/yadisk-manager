@@ -2977,10 +2977,18 @@ class MainWindow(QMainWindow):
         # простой startswith) отсекает соседей вида "<cache>_evil".
         cache_root = os.path.normcase(os.path.abspath(_cache_dir()))
         local_norm = os.path.normcase(os.path.abspath(local_path))
-        if not local_norm.startswith(cache_root + os.sep) and local_norm != cache_root:
+        # normpath("C:\\") сохраняет хвостовой разделитель: cache_root + os.sep
+        # дал бы "c:\\\\" и отбросил бы все файлы диска.
+        cache_base = cache_root.rstrip(os.sep) + os.sep
+        if not local_norm.startswith(cache_base) and local_norm != cache_root.rstrip(os.sep):
             logger.debug("Created file outside cache: %s", local_path)
             return
         rel = os.path.relpath(local_path, _cache_dir()).replace("\\", "/")
+        if rel in ("", "."):
+            # Сам корень кеша — не файл: relpath дал бы "/." и мусорную
+            # syncing-запись для каталога.
+            logger.debug("Created path is the cache root itself: %s", local_path)
+            return
         cloud_path = "/" + rel.lstrip("/")
         logger.info("New local file detected, uploading: %s → %s", local_path, cloud_path)
         self._register_new_file(local_path, cloud_path)
