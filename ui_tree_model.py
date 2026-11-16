@@ -108,12 +108,17 @@ class FolderTreeModel(QAbstractItemModel):
         self.endInsertRows()
 
     def populate_children_from_db(self, cloud_path: str, folders: list[dict],
-                                  with_subdirs: set[str]) -> None:
+                                  with_subdirs: set[str],
+                                  status_override: str | None = None) -> None:
         """Мгновенно вставить детей из SQLite (вызов только из главного потока).
 
         Узел получает db_loaded=True: дети и стрелки видны сразу, без API.
         API-сверка досинхронизируется позже через merge_children_from_api().
         Повторный вызов — no-op.
+
+        status_override: если задан, все дети получают этот статус, а
+        batch-запрос агрегатов к БД не выполняется (офлайн-режим: статус
+        содержимого неизвестен, пока нет связи с облаком).
         """
         parent_item = self._find_item(cloud_path)
         if not parent_item or parent_item.loaded or parent_item.db_loaded:
@@ -124,7 +129,9 @@ class FolderTreeModel(QAbstractItemModel):
             return
         parent_index = self._index_of(parent_item)
         self.beginInsertRows(parent_index, 0, len(folders) - 1)
-        if self._db is not None:
+        if status_override is not None:
+            batch_statuses = {}
+        elif self._db is not None:
             folder_paths = [f["path"] for f in folders]
             batch_statuses = self._db.get_folder_batch_aggregate_status(
                 cloud_path, folder_paths)
@@ -133,7 +140,8 @@ class FolderTreeModel(QAbstractItemModel):
         for f in folders:
             child = FolderTreeItem(
                 name=f["name"], cloud_path=f["path"], parent=parent_item)
-            child.status = batch_statuses.get(f["path"], "cloud_only")
+            child.status = (status_override if status_override is not None
+                            else batch_statuses.get(f["path"], "cloud_only"))
             # Точная стрелка из БД: знаем, есть ли у ребёнка свои подпапки
             child._has_children = f["path"] in with_subdirs
             child.arrow_known = True

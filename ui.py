@@ -518,7 +518,10 @@ class MainWindow(QMainWindow):
                 self._hide_tree_loading()
                 self._hide_table_loading()
                 return
-            self.statusBar().showMessage(f"Ошибка загрузки папок: {error}")
+            # Офлайн: наполняем дерево папками из SQLite, чтобы навигация
+            # по известным папкам работала без сети
+            self._populate_tree_from_db("/")
+            self.statusBar().showMessage(f"Офлайн: дерево из кэша ({error})")
         else:
             self.tree_model.populate_children("/", items)
             logger.info("Tree loaded: %d top-level folders",
@@ -529,10 +532,18 @@ class MainWindow(QMainWindow):
         # Фокус на дерево папок (а не на строку поиска),
         # только когда оно реально видимо после снятия loading-оверлея
         self.tree_view.setFocus()
-        # После дерева — загружаем файлы (API + SQLite в фоновом потоке)
+        # После дерева — загружаем файлы (API + SQLite в фоновом потоке).
+        # При ошибке API офлайн-данные берём только из SQLite.
         self._show_loading("Загрузка файлов...")
         self._show_table_loading()
-        self._start_folder_load("/", use_api=True, after_all_files=True)
+        self._start_folder_load("/", use_api=not error,
+                                after_all_files=not error)
+
+    def _populate_tree_from_db(self, path: str = "/") -> None:
+        """Офлайн: наполнить узел дерева папками из SQLite (статус unknown)."""
+        folders, subs = self._db.get_dir_tree_levels(path)
+        self.tree_model.populate_children_from_db(
+            path, folders, subs, status_override="unknown")
 
     def _start_folder_load(self, path: str, use_api: bool = True,
                            after_all_files: bool = False,
@@ -682,6 +693,10 @@ class MainWindow(QMainWindow):
         if not item or item.loaded:
             return
         path = item.cloud_path
+        # Офлайн: подпапки берём из SQLite, API не дёргаем
+        if not getattr(self, "_online", True):
+            self._populate_tree_from_db(path)
+            return
         self._fetch_folder_list(path, lambda items, err: self._on_tree_children_loaded(items, err, path))
 
     def _expand_tree_root(self):
@@ -701,6 +716,8 @@ class MainWindow(QMainWindow):
     def _on_tree_children_loaded(self, items, error, cloud_path: str):
         """Подпапки загружены — добавляем в модель дерева."""
         if error:
+            # API недоступен → наполняем узел из SQLite
+            self._populate_tree_from_db(cloud_path)
             return
         self.tree_model.populate_children(cloud_path, items)
         # Если после загрузки нет подпапок → скрываем стрелку раскрытия
@@ -2020,6 +2037,11 @@ class MainWindow(QMainWindow):
         if old_online != self._online:
             logger.info(f"Статус подключения изменился: {'онлайн' if self._online else 'офлайн'}")
             self._update_app_icons(update_tray_only=True)
+        # Восстановление связи: перечитываем дерево с API и запускаем
+        # полную сверку, чтобы подтянуть изменения из облака
+        if not old_online and self._online:
+            self._fetch_folder_list("/", self._on_tree_loaded)
+            self._start_bulk_sync()
 
     def _sync_log_zorder(self):
         """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
