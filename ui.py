@@ -521,6 +521,8 @@ class MainWindow(QMainWindow):
             # Офлайн: наполняем дерево папками из SQLite, чтобы навигация
             # по известным папкам работала без сети
             self._populate_tree_from_db("/")
+            # PLANS 3.7: офлайн-дерево не должно оставаться нераскрытым
+            self._expand_tree_root()
             self.statusBar().showMessage(f"Офлайн: дерево из кэша ({error})")
         else:
             self.tree_model.populate_children("/", items)
@@ -534,10 +536,32 @@ class MainWindow(QMainWindow):
         self.tree_view.setFocus()
         # После дерева — загружаем файлы (API + SQLite в фоновом потоке).
         # При ошибке API офлайн-данные берём только из SQLite.
-        self._show_loading("Загрузка файлов...")
+        if error:
+            # Офлайн: полной загрузки файлов не будет (_on_all_files_loaded
+            # не запустится), поэтому индикатор не показываем — иначе он
+            # висит вечно и затирает сообщение «Офлайн: дерево из кэша».
+            self._hide_loading()
+        else:
+            self._show_loading("Загрузка файлов...")
         self._show_table_loading()
         self._start_folder_load("/", use_api=not error,
                                 after_all_files=not error)
+
+    def _on_reconnect_tree_loaded(self, items, error):
+        """Восстановление связи: обновить только дерево, не трогая таблицу.
+
+        Полный _on_tree_loaded переключает таблицу на «/», показывает
+        лоадеры и запускает загрузку файлов — при восстановлении связи
+        пользователь может быть в подпапке, поэтому здесь обновляем лишь
+        содержимое корня дерева (мерж поверх офлайн-данных из SQLite).
+        """
+        if error:
+            logger.error("Tree refresh after reconnect failed: %s", error)
+            # Дерево уже содержит данные из SQLite — оставляем как есть
+            return
+        self.tree_model.populate_children("/", items)
+        self._expand_tree_root()
+        self._hide_tree_loading()
 
     def _populate_tree_from_db(self, path: str = "/") -> None:
         """Офлайн: наполнить узел дерева папками из SQLite (статус unknown)."""
@@ -695,7 +719,9 @@ class MainWindow(QMainWindow):
         path = item.cloud_path
         # Офлайн: подпапки берём из SQLite, API не дёргаем
         if not getattr(self, "_online", True):
-            self._populate_tree_from_db(path)
+            # Узел уже наполнен из БД — повторный запрос к SQLite не нужен
+            if not item.db_loaded:
+                self._populate_tree_from_db(path)
             return
         self._fetch_folder_list(path, lambda items, err: self._on_tree_children_loaded(items, err, path))
 
@@ -2040,7 +2066,8 @@ class MainWindow(QMainWindow):
         # Восстановление связи: перечитываем дерево с API и запускаем
         # полную сверку, чтобы подтянуть изменения из облака
         if not old_online and self._online:
-            self._fetch_folder_list("/", self._on_tree_loaded)
+            # Только дерево: таблица и текущая папка пользователя не сбрасываются
+            self._fetch_folder_list("/", self._on_reconnect_tree_loaded)
             self._start_bulk_sync()
 
     def _sync_log_zorder(self):
