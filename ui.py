@@ -2970,14 +2970,18 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(2000, lambda: self._flush_pending_upload())
             return
 
-        # Новый файл в кеше — загружаем в облако (но не подпапки)
-        cache_dir = _cache_dir().replace("\\", "/")
-        local_path_posix = local_path.replace("\\", "/")
-        if not local_path_posix.startswith(cache_dir):
+        # Новый файл в кеше — загружаем в облако (но не подпапки).
+        # Путь из Проводника может прийти с '\\', другим регистром диска
+        # и '..' — сравниваем нормализованные абсолютные пути, иначе файл
+        # ошибочно считается лежащим вне кеша. Проверка через os.sep (а не
+        # простой startswith) отсекает соседей вида "<cache>_evil".
+        cache_root = os.path.normcase(os.path.abspath(_cache_dir()))
+        local_norm = os.path.normcase(os.path.abspath(local_path))
+        if not local_norm.startswith(cache_root + os.sep) and local_norm != cache_root:
             logger.debug("Created file outside cache: %s", local_path)
             return
-        rel = local_path_posix[len(cache_dir):].lstrip("/")
-        cloud_path = "/" + rel.replace("\\", "/")
+        rel = os.path.relpath(local_path, _cache_dir()).replace("\\", "/")
+        cloud_path = "/" + rel.lstrip("/")
         logger.info("New local file detected, uploading: %s → %s", local_path, cloud_path)
         self._register_new_file(local_path, cloud_path)
         QTimer.singleShot(2000, lambda: self._flush_pending_upload())
