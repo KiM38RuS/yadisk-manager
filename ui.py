@@ -96,6 +96,10 @@ import updater
 # Интервал полного опроса всех файлов для детекции изменений в облаке (15 мин)
 BULK_SYNC_INTERVAL_MS = 900000
 
+# Задержка flush очереди выгрузки: объединяет серию файловых событий
+# (автосохранение, распаковка, копирование) в одну пачку, но быстро.
+UPLOAD_FLUSH_DELAY_MS = 250
+
 # Map QEvent.Type int → name for diagnostics
 _EVENT_NAMES: dict[int, str] | None = None
 def event_type_name(et: int) -> str:
@@ -368,6 +372,9 @@ class MainWindow(QMainWindow):
         self._bulk_sync_timer.start(BULK_SYNC_INTERVAL_MS)
         # Первый bulk sync — через 10 секунд после старта
         QTimer.singleShot(10000, self._start_bulk_sync)
+
+        # Отложенный flush очереди выгрузки (создаётся лениво)
+        self._upload_flush_timer: QTimer | None = None
 
         # Асинхронная загрузка данных — окно покажется сразу
         self._show_left_busy("Загрузка...")
@@ -2484,7 +2491,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, lambda: self._load_folder_local(self._current_path))
         
         # Запускаем загрузку изменённых файлов (если есть)
-        QTimer.singleShot(2000, self._flush_pending_upload)
+        self._schedule_upload_flush()
         
         # Проверка облака: новые файлы в полностью скачанных папках
         self._show_left_busy("Проверка облака...", timeout=8000)
@@ -2574,7 +2581,7 @@ class MainWindow(QMainWindow):
         self._hide_left_busy()
         self.statusBar().showMessage(
             f"✅ Перетащено: {count} файл(ов) в {self._current_path}", 5000)
-        QTimer.singleShot(2000, self._flush_pending_upload)
+        self._schedule_upload_flush()
 
     def _handle_internal_drop(self, paths: list[str], dest: str, is_move: bool):
         """Обработка внутреннего DnD: копирование/перемещение облачных путей."""
@@ -2953,7 +2960,7 @@ class MainWindow(QMainWindow):
             self._refresh_folder_view()
         self._update_tree_status(cloud_path)
         self._pend_upload.add(cloud_path)
-        QTimer.singleShot(2000, lambda: self._flush_pending_upload())
+        self._schedule_upload_flush()
 
     def _handle_file_created(self, local_path: str):
         """Новый локальный файл — проверить, есть ли в облаке, если нет — загрузить."""
@@ -2967,7 +2974,7 @@ class MainWindow(QMainWindow):
                 self._dirty_uploads.add(cloud_path)
                 return
             self._register_new_file(local_path, cloud_path)
-            QTimer.singleShot(2000, lambda: self._flush_pending_upload())
+            self._schedule_upload_flush()
             return
 
         # Новый файл в кеше — загружаем в облако (но не подпапки).
@@ -2992,7 +2999,7 @@ class MainWindow(QMainWindow):
         cloud_path = "/" + rel.lstrip("/")
         logger.info("New local file detected, uploading: %s → %s", local_path, cloud_path)
         self._register_new_file(local_path, cloud_path)
-        QTimer.singleShot(2000, lambda: self._flush_pending_upload())
+        self._schedule_upload_flush()
 
     def _handle_file_deleted(self, local_path: str, is_directory: bool = False):
         """Локальный файл/папка удалён — обновить статус в БД."""
@@ -3058,6 +3065,14 @@ class MainWindow(QMainWindow):
             self._dirty_uploads.discard(cp)
             self._pend_upload.add(cp)
         QTimer.singleShot(0, self._flush_pending_upload)
+
+    def _schedule_upload_flush(self, delay_ms: int = UPLOAD_FLUSH_DELAY_MS) -> None:
+        """Отложить flush очереди выгрузки (объединение серии изменений)."""
+        if self._upload_flush_timer is None:
+            self._upload_flush_timer = QTimer()
+            self._upload_flush_timer.setSingleShot(True)
+            self._upload_flush_timer.timeout.connect(self._flush_pending_upload)
+        self._upload_flush_timer.start(delay_ms)
 
     def _flush_pending_upload(self):
         if not self._pend_upload:
@@ -4745,7 +4760,7 @@ class MainWindow(QMainWindow):
             # status="modified" переводит запись в conflict (см. VanishedResolveThread).
             self._db.set_status(cloud_path, "modified")
             self._pend_upload.add(cloud_path)
-            QTimer.singleShot(0, self._flush_pending_upload)
+            self._schedule_upload_flush()
             return
 
         try:
