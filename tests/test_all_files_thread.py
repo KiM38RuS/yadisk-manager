@@ -214,5 +214,95 @@ class TestAllFilesThreadParallel(unittest.TestCase):
                                 "После успешного retry БД должна получить данные")
 
 
+class TestAllFilesThreadVanished(unittest.TestCase):
+    """Полный обход Диска: исчезнувшие из облака файлы (Task 6).
+
+    Разрешение запускается только для полного скана с нуля (offset == 0) и
+    только если реально что-то загружено — иначе пустой ответ API выглядел бы
+    как «в облаке нет ни одного файла» и все локальные копии были бы удалены.
+    """
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+        self._app = QApplication.instance() or QApplication([])
+
+        self.api = MagicMock()
+        self.database = MagicMock()
+        self.database.get_local_files_not_in.return_value = [
+            {"cloud_path": "/gone.txt", "local_path": "C:/cache/gone.txt",
+             "md5": "m", "last_sync_md5": "m", "status": "downloaded"},
+        ]
+
+        # run() читает module-level db.get_all_files_offset() и пишет
+        # db.set_all_files_offset() — подменяем их, как в TestAllFilesThreadParallel.
+        self._mock_get_offset = MagicMock(return_value=0)
+        self._db_patches = [
+            patch("db.get_all_files_offset", self._mock_get_offset),
+            patch("db.set_all_files_offset"),
+        ]
+        for p in self._db_patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._db_patches:
+            p.stop()
+
+    @staticmethod
+    def _page_for(limit, offset):
+        """Непустая страница только для offset == 0 (4 параллельных запроса)."""
+        if offset == 0:
+            return [{"path": "/keep.txt", "name": "keep.txt", "type": "file"}]
+        return []
+
+    def _run(self):
+        self.api.get_all_files_page.side_effect = self._page_for
+        thread = ui_threads.AllFilesThread(self.api, self.database)
+        out = []
+        thread.vanished.connect(out.extend)
+        thread.run()
+        return out
+
+    def test_emits_vanished_after_full_scan(self):
+        """Скан с нуля загрузил хотя бы страницу — исчезнувший файл отдан в UI."""
+        out = self._run()
+
+        self.assertEqual([r["cloud_path"] for r in out], ["/gone.txt"])
+        self.database.get_local_files_not_in.assert_called_once()
+
+    def test_does_not_emit_when_resumed(self):
+        """Докачка с сохранённого offset — список неполный, vanished не эмитится."""
+        self._mock_get_offset.return_value = 500
+
+        out = self._run()
+
+        self.assertEqual(out, [])
+        self.database.get_local_files_not_in.assert_not_called()
+
+    def test_does_not_emit_on_empty_first_page(self):
+        """Пустой первый ответ API — не повод объявлять все локальные файлы исчезнувшими."""
+        self.api.get_all_files_page.return_value = []
+
+        thread = ui_threads.AllFilesThread(self.api, self.database)
+        out = []
+        thread.vanished.connect(out.extend)
+        thread.run()
+
+        self.assertEqual(out, [])
+        self.database.get_local_files_not_in.assert_not_called()
+
+    def test_excludes_syncing_files(self):
+        """Файл в процессе загрузки не может быть исчезнувшим."""
+        self.database.get_local_files_not_in.return_value = [
+            {"cloud_path": "/uploading.txt", "local_path": "C:/cache/u.txt",
+             "md5": "u", "last_sync_md5": "u", "status": "syncing"},
+            {"cloud_path": "/gone.txt", "local_path": "C:/cache/gone.txt",
+             "md5": "m", "last_sync_md5": "m", "status": "downloaded"},
+        ]
+
+        out = self._run()
+
+        self.assertEqual([r["cloud_path"] for r in out], ["/gone.txt"])
+
+
 if __name__ == "__main__":
     unittest.main()

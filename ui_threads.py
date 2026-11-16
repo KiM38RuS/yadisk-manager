@@ -145,14 +145,16 @@ class FolderLoadThread(QThread):
     use_api=True  — запросить список с API, синхронизировать БД, собрать items
     use_api=False — только БД + файловая система (навигация по локальному кешу)
 
-    finished(path, items, fixed_paths, reverse_checks, error_msg)
+    finished(path, items, fixed_paths, reverse_checks, error_msg, vanished)
       path           — облачный путь
       items          — записи, готовые к отображению (list[dict])
       fixed_paths    — cloud_path файлов, найденных локально (статус исправлен → upload)
       reverse_checks — list[(cloud_path, local_path, last_sync_md5)] для reverse sync
       error_msg      — "" при успехе
+      vanished       — скачанные файлы, пропавшие из облака (list[dict]);
+                       UI запускает их разрешение (offline / удаление)
     """
-    finished = Signal(str, list, list, list, str)
+    finished = Signal(str, list, list, list, str, list)
 
     def __init__(self, api, database, path: str, use_api: bool = True,
                  recently_deleted=None, syncing=None, parent=None):
@@ -166,6 +168,7 @@ class FolderLoadThread(QThread):
 
     def run(self):
         try:
+            vanished: list[dict] = []
             if self._use_api:
                 items = self._api.list_folder(self._path)
                 # Фильтруем пути, которые пользователь только что удалил
@@ -175,7 +178,8 @@ class FolderLoadThread(QThread):
                              and not any(d in it.get("path", "")
                                          for d in self._recently_deleted)]
                 try:
-                    self._database.sync_children_from_api(self._path, items)
+                    vanished = self._database.sync_children_from_api(
+                        self._path, items)
                 except Exception as e:
                     logger.error("sync_children_from_api failed: %s — fallback to upsert only", e)
                     self._database.upsert_files_batch(items)
@@ -247,10 +251,11 @@ class FolderLoadThread(QThread):
                     if os.path.exists(lp):
                         reverse_checks.append((item["path"], lp, last_sync))
 
-            self.finished.emit(self._path, items, fixed_paths, reverse_checks, "")
+            self.finished.emit(self._path, items, fixed_paths, reverse_checks,
+                               "", vanished)
         except Exception as e:
             logger.error("FolderLoadThread: %s FAILED: %s", self._path, e)
-            self.finished.emit(self._path, [], [], [], str(e))
+            self.finished.emit(self._path, [], [], [], str(e), [])
 
 
 class AllFilesThread(QThread):
@@ -269,6 +274,10 @@ class AllFilesThread(QThread):
     """
     finished = Signal(int)        # всего загружено файлов (счётчик), 0 = неудача
     progress = Signal(int, int)   # offset, текущее количество
+    # Скачанные файлы, которых нет в облачном списке (list[dict]). Эмитится
+    # только после полного скана с нуля и только для непустого результата —
+    # чтобы пустой ответ API не «удалил» все локальные копии.
+    vanished = Signal(list)
 
     # 500 — баланс между размером ответа API (limit поддерживается до 1000)
     # и временем парсинга JSON / записи в БД. С параллельной загрузкой
@@ -293,6 +302,10 @@ class AllFilesThread(QThread):
 
     def run(self):
         offset = db.get_all_files_offset()
+        # Полный скан с нуля (не докачка) — только тогда облачный список
+        # полон и по нему можно судить об исчезнувших файлах.
+        started_at_zero = offset == 0
+        cloud_paths: set[str] = set()
         loaded = 0
         retries = 0
 
@@ -361,6 +374,7 @@ class AllFilesThread(QThread):
                     # Пустая страница = конец списка
                     db.set_all_files_offset(0)
                     logger.info("AllFilesThread: %d files loaded", loaded)
+                    self._emit_vanished(cloud_paths, started_at_zero, loaded)
                     self.finished.emit(loaded)
                     return
                 # Сохраняем в БД
@@ -371,6 +385,7 @@ class AllFilesThread(QThread):
                     self.finished.emit(loaded)
                     return
                 loaded += len(page)
+                cloud_paths.update(it["path"] for it in page if it.get("path"))
                 any_inserted = True
 
             if not any_inserted:
@@ -385,7 +400,32 @@ class AllFilesThread(QThread):
         # Успех — все файлы загружены, сбрасываем offset
         db.set_all_files_offset(0)
         logger.info("AllFilesThread: %d files loaded", loaded)
+        self._emit_vanished(cloud_paths, started_at_zero, loaded)
         self.finished.emit(loaded)
+
+    def _emit_vanished(self, cloud_paths: set[str], started_at_zero: bool,
+                       loaded: int):
+        """Отдать UI скачанные файлы, отсутствующие в облачном списке (Task 6).
+
+        Эмитим только для полного скана с нуля и непустого результата:
+        пустой ответ API (ошибка/пустая первая страница) иначе объявил бы
+        исчезнувшими ВСЕ локальные копии и привёл бы к массовому удалению.
+        Статус `syncing` исключаем — файл ещё выгружается и мог не попасть
+        в только что полученный список.
+        """
+        if not started_at_zero or loaded <= 0 or not cloud_paths:
+            return
+        try:
+            missing = self._database.get_local_files_not_in(cloud_paths)
+        except Exception as e:
+            logger.error("AllFilesThread: vanished lookup failed: %s", e)
+            return
+        missing = [r for r in missing if r.get("status") != "syncing"]
+        if not missing:
+            return
+        logger.info("AllFilesThread: %d downloaded file(s) vanished from cloud",
+                    len(missing))
+        self.vanished.emit(missing)
 
 
 class FolderDownloadThread(QThread):

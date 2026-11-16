@@ -552,8 +552,8 @@ class MainWindow(QMainWindow):
             recently_deleted=self._recently_deleted,
             syncing=self._syncing, parent=self)
         thread.finished.connect(
-            lambda p, i, f, r, e, _aaf=after_all_files, _g=nav_gen:
-                self._on_folder_loaded(p, i, f, r, e, _aaf, _g))
+            lambda p, i, f, r, e, v, _aaf=after_all_files, _g=nav_gen:
+                self._on_folder_loaded(p, i, f, r, e, v, _aaf, _g))
         thread.finished.connect(thread.deleteLater)
         self._active_threads.append(thread)
         thread.finished.connect(lambda: self._cleanup_thread(thread))
@@ -561,9 +561,13 @@ class MainWindow(QMainWindow):
 
     def _on_folder_loaded(self, path: str, items: list, fixed_paths: list,
                           reverse_checks: list, error: str,
+                          vanished: list | None = None,
                           after_all_files: bool = False,
                           nav_gen: int = -1):
         """Применить результат FolderLoadThread к UI (только быстрые операции).
+
+        vanished: скачанные файлы, пропавшие из облака, — запускаем их
+        разрешение (offline / удаление / восстановление).
 
         nav_gen: токен поколения навигации (>=0). Если >=0 и совпадает
         с текущим self._nav_gen — уменьшаем self._nav_ops_pending.
@@ -626,12 +630,15 @@ class MainWindow(QMainWindow):
             self._start_all_files_load()
         # Шаг 1 или Шаг 2 навигации завершён успешно — уменьшаем счётчик
         self._nav_op_done(nav_gen, f"folder-load-ok:{path}")
+        # Исчезнувшие из облака файлы: запускаем разрешение (Task 6)
+        self._start_vanished_resolve(vanished or [])
 
     def _start_all_files_load(self):
         """Запустить фоновую загрузку полного списка файлов (для локальной навигации)."""
         thread = _AllFilesThread(self._api, self._db, self)
         thread.finished.connect(self._on_all_files_loaded)
         thread.progress.connect(self._on_all_files_progress)
+        thread.vanished.connect(self._start_vanished_resolve)
         thread.finished.connect(thread.deleteLater)
         self._active_threads.append(thread)
         thread.finished.connect(lambda: self._cleanup_thread(thread))
@@ -4365,6 +4372,7 @@ class MainWindow(QMainWindow):
         logger.info("Bulk sync: starting full file scan...")
         thread = _AllFilesThread(self._api, self._db, self)
         thread.finished.connect(self._on_bulk_sync_complete)
+        thread.vanished.connect(self._start_vanished_resolve)
         thread.finished.connect(thread.deleteLater)
         self._active_threads.append(thread)
         thread.finished.connect(lambda: self._cleanup_thread(thread))
