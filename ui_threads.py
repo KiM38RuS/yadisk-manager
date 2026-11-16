@@ -667,10 +667,14 @@ class StartupScanThread(QThread):
             # 2. New files in cache not tracked in DB
             cache_dir_norm = self._cache_dir.replace("\\", "/")
             known_local = set()
-            for rec in self._database.get_by_status("downloaded"):
-                lp = rec.get("local_path") or self._local_path(rec["cloud_path"])
-                if lp:
-                    known_local.add(lp.replace("\\", "/").lower())
+            # "modified" — файл, который пользователь решил оставить локально
+            # после удаления облачной копии. Он тоже должен считаться известным,
+            # иначе стартовый скан переоформит его в downloaded и сотрёт маркер.
+            for status in ("downloaded", "modified"):
+                for rec in self._database.get_by_status(status):
+                    lp = rec.get("local_path") or self._local_path(rec["cloud_path"])
+                    if lp:
+                        known_local.add(lp.replace("\\", "/").lower())
 
             for root, _dirs, files in os.walk(self._cache_dir):
                 if self._stop_requested:
@@ -781,6 +785,13 @@ class StartupScanThread(QThread):
             rel = fpath[len(cache_dir_norm):].lstrip("/")
             cloud_path = "/" + rel
             existing = self._database.get_file(cloud_path)
+            if existing and existing.get("status") == "modified":
+                # Keep-local маркер (облачная копия удалена, пользователь оставил
+                # локальную версию): не переводим в downloaded и не заполняем
+                # last_sync_md5 — иначе следующий проход разрешения удалит файл.
+                logger.info("Startup: keeping locally modified file as is: %s",
+                            cloud_path)
+                continue
             if existing:
                 # Файл уже есть в облаке и в БД (cloud_only после
                 # «Оставить только в облаке»). Пользователь вручную

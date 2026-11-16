@@ -74,3 +74,24 @@ def test_modified_status_conflicts_even_without_last_sync(qapp, in_memory_db,
                                "local_path": str(lp),
                                "last_sync_md5": "", "status": "modified"}])
     assert out[0]["action"] == "conflict"
+
+
+def test_startup_scan_preserves_modified_marker(qapp, in_memory_db, tmp_path):
+    """Стартовый скан не должен превращать keep-local маркер в downloaded."""
+    from ui_threads import StartupScanThread
+    lp = tmp_path / "photos" / "old.jpg"
+    lp.parent.mkdir()
+    lp.write_bytes(b"local")
+    in_memory_db.upsert_file("/photos/old.jpg", "old.jpg", "file", size=5, md5="cloud")
+    in_memory_db.set_downloaded("/photos/old.jpg", str(lp), last_sync_md5="cloud")
+    in_memory_db.set_status("/photos/old.jpg", "modified")
+    in_memory_db.update_last_sync_md5("/photos/old.jpg", "")
+
+    StartupScanThread(None, in_memory_db, str(tmp_path)).run()
+
+    row = in_memory_db.get_file("/photos/old.jpg")
+    assert row["status"] == "modified"
+    assert (row["last_sync_md5"] or "") == ""
+
+    out = _run(in_memory_db, [{"cloud_path": "/photos/old.jpg"}])
+    assert out[0]["action"] == "conflict"
