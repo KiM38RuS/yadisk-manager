@@ -100,6 +100,11 @@ BULK_SYNC_INTERVAL_MS = 900000
 # (автосохранение, распаковка, копирование) в одну пачку, но быстро.
 UPLOAD_FLUSH_DELAY_MS = 250
 
+# Потолок полного ожидания flush: при непрерывном потоке событий (копирование,
+# распаковка) таймер перезапускался бы вечно — через этот интервал flush идёт
+# на следующем витке event loop в любом случае.
+UPLOAD_FLUSH_MAX_WAIT_MS = 1000
+
 # Map QEvent.Type int → name for diagnostics
 _EVENT_NAMES: dict[int, str] | None = None
 def event_type_name(et: int) -> str:
@@ -375,6 +380,7 @@ class MainWindow(QMainWindow):
 
         # Отложенный flush очереди выгрузки (создаётся лениво)
         self._upload_flush_timer: QTimer | None = None
+        self._upload_flush_first = 0.0  # якорь для потолка ожидания (time.monotonic)
 
         # Асинхронная загрузка данных — окно покажется сразу
         self._show_left_busy("Загрузка...")
@@ -3067,14 +3073,28 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._flush_pending_upload)
 
     def _schedule_upload_flush(self, delay_ms: int = UPLOAD_FLUSH_DELAY_MS) -> None:
-        """Отложить flush очереди выгрузки (объединение серии изменений)."""
+        """Отложить flush очереди выгрузки (объединение серии изменений).
+
+        Серия коротких изменений объединяется перезапуском таймера, но общее
+        ожидание ограничено UPLOAD_FLUSH_MAX_WAIT_MS — иначе непрерывные
+        события (bulk copy/unzip) не дали бы загрузке никогда начаться.
+        """
+        now = time.monotonic()
+        if not self._upload_flush_first:
+            self._upload_flush_first = now
         if self._upload_flush_timer is None:
             self._upload_flush_timer = QTimer()
             self._upload_flush_timer.setSingleShot(True)
             self._upload_flush_timer.timeout.connect(self._flush_pending_upload)
-        self._upload_flush_timer.start(delay_ms)
+        if (now - self._upload_flush_first
+                >= UPLOAD_FLUSH_MAX_WAIT_MS / 1000):
+            # Потолок достигнут — не откладывать ещё на delay_ms
+            self._upload_flush_timer.start(0)
+        else:
+            self._upload_flush_timer.start(delay_ms)
 
     def _flush_pending_upload(self):
+        self._upload_flush_first = 0.0  # новый цикл отсчитывает ожидание с нуля
         if not self._pend_upload:
             return
         batch = list(self._pend_upload)

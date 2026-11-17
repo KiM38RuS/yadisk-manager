@@ -3,7 +3,8 @@
 Files collapsing into a save series (editor autosave, unzip, Explorer copy)
 must reach the cloud quickly, but without one upload burst per event.  The
 2 s fixed timer is replaced by a 250 ms single-shot timer that is restarted
-on every new event (coalescing).
+on every new event (coalescing), with a bounded total wait so continuous
+activity cannot starve the flush forever.
 """
 
 import os
@@ -24,6 +25,7 @@ def qapp():
 
 class _Stub:
     _upload_flush_timer = None
+    _upload_flush_first = 0.0
 
     def _flush_pending_upload(self):
         pass
@@ -31,12 +33,38 @@ class _Stub:
 
 class _CountingStub:
     _upload_flush_timer = None
+    _upload_flush_first = 0.0
 
     def __init__(self):
         self.flush_calls = 0
 
     def _flush_pending_upload(self):
         self.flush_calls += 1
+
+
+class _ClockStub:
+    """Stub, чей flush идёт через настоящий метод (проверяем сброс якоря)."""
+
+    _upload_flush_timer = None
+    _upload_flush_first = 0.0
+
+    def __init__(self):
+        self._pend_upload = set()
+        self.flush_calls = 0
+
+    def _flush_pending_upload(self):
+        import ui as ui_mod
+
+        ui_mod.MainWindow._flush_pending_upload(self)
+        self.flush_calls += 1
+
+
+class _Clock:
+    def __init__(self, values):
+        self._values = iter(values)
+
+    def monotonic(self):
+        return next(self._values)
 
 
 def test_flush_delay_is_short_and_single_shot(qapp):
@@ -60,8 +88,29 @@ def test_repeated_schedules_coalesce_into_one_flush(qapp):
     ui_mod.MainWindow._schedule_upload_flush(stub)
     ui_mod.MainWindow._schedule_upload_flush(stub)
 
-    QTest.qWait(ui_mod.UPLOAD_FLUSH_DELAY_MS + 150)
+    QTest.qWait(ui_mod.UPLOAD_FLUSH_DELAY_MS + 350)
     assert stub.flush_calls == 1
+
+
+def test_max_wait_bounds_debounce_starvation(qapp, monkeypatch):
+    """Непрерывные изменения не могут откладывать flush бесконечно."""
+    from PySide6.QtTest import QTest
+
+    import ui as ui_mod
+
+    stub = _ClockStub()
+    times = [1000.0, 1000.2, 1000.4, 1000.6, 1000.8, 1001.0, 1001.1]
+    assert ui_mod.UPLOAD_FLUSH_MAX_WAIT_MS == 1000
+    with patch.object(ui_mod, "time", _Clock(times)):
+        for _ in times:
+            ui_mod.MainWindow._schedule_upload_flush(stub)
+        assert stub._upload_flush_first == 1000.0
+        # после 1.1 c ожидания — принудительный flush на следующем тике
+        assert stub._upload_flush_timer.interval() == 0
+
+    QTest.qWait(50)
+    assert stub.flush_calls == 1
+    assert stub._upload_flush_first == 0.0
 
 
 def _window(db):
@@ -114,6 +163,19 @@ def test_created_new_in_cache_file_uses_debounced_flush(
     mw._register_new_file.assert_called_once()
     sched.assert_called_once()
     assert all(call.args[0] != 2000 for call in shot.call_args_list)
+
+
+def test_remote_delete_conflict_uses_debounced_flush(qapp):
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._pend_upload = set()
+    with patch.object(ui_mod.QGuiApplication, "platformName",
+                      return_value="offscreen"):
+        ui_mod.MainWindow._handle_remote_delete_conflict(mw, "/a.txt", "")
+
+    assert "/a.txt" in mw._pend_upload
+    mw._schedule_upload_flush.assert_called_once()
 
 
 def test_no_two_second_flush_left_in_source():
