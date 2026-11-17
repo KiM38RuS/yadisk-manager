@@ -884,6 +884,11 @@ class MainWindow(QMainWindow):
         self.tree_model.modelReset.connect(self._expand_tree_root)
         # Клик по пустому месту — сброс выделения
         self.tree_view.viewport().installEventFilter(self)
+        # Фильтр на сам виджет (как у table_view): F2/Enter в дереве не должны
+        # зависеть от app-level фильтра. App-level видит событие первым и
+        # съедает обработанные клавиши (return True), поэтому дубля нет;
+        # необработанные клавиши проходят оба фильтра без побочных эффектов.
+        self.tree_view.installEventFilter(self)
         self.tree_view.viewport().setAcceptDrops(True)
         self.tree_view.setDragEnabled(True)
 
