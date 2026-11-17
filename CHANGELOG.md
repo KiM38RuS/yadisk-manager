@@ -3,12 +3,14 @@
 ## [Unreleased]
 
 ### Исправлено
-- **Ложный конфликт после повторного локального изменения во время выгрузки** (PLANS 3.8): `UploadWorker` возвращает MD5 фактически отправленных байтов, очередь результатов и `_dirty_uploads` сравнивают локальный файл с этой версией; изменение, случившееся во время upload, помечается dirty и выгружается повторно без диалога. MD5 пересчитывается только при изменении `(size, mtime_ns)` (`_upload_stamps`), а не на каждой выгрузке.
+- **Ложный конфликт после повторного локального изменения во время выгрузки** (PLANS 3.8): `UploadWorker` возвращает MD5 фактически отправленных байтов, очередь результатов и `_dirty_uploads` сравнивают локальный файл с этой версией; изменение, случившееся во время upload, помечается dirty и выгружается повторно без диалога. После завершения upload файл не хешируется повторно, если `(size, mtime_ns)` не изменился (`_upload_stamps`); полное сравнение MD5 выполняется только тогда, когда stat изменился.
 - **Удаления и перемещения с другого ПК применяются локально** (PLANS 3.9): `sync_children_from_api()` и `get_local_files_not_in()` отдают `status`, `VanishedResolveThread` удаляет локальную копию, а при совпадении MD5 (`find_file_by_md5`) переносит её на новое облачное имя вместо повторной выгрузки; `_recently_uploaded` (30 с) защищает только что отправленные файлы, «оставить локально» пишет `status='modified'`.
 - **Watchdog не видел новые файлы, созданные вне Менеджера** (PLANS 3.5): в `MainWindow._handle_file_created()` путь нормализуется `os.path.normcase(os.path.abspath(...))`, принадлежность кешу проверяется по префиксу с `os.sep` (корректно и для корня диска), `rel in ("", ".")` отбрасывается.
 - **Авто-загрузка изменённого файла стартовала не сразу** (PLANS 3.6): debounce снижен с 2000 до 250 мс (`UPLOAD_FLUSH_DELAY_MS`), при непрерывных watcher-событиях общее ожидание ограничено 1000 мс (`UPLOAD_FLUSH_MAX_WAIT_MS`) с принудительным flush; конфликтная ветка после «оставить локально» использует тот же debounce.
 - **Офлайн-старт показывал пустое дерево** (PLANS 3.7): при отсутствии сети дерево строится из SQLite (`populate_children_from_db(..., status_override)`), корень раскрывается, спиннер скрывается; переподключение обновляет только дерево, не сбивая таблицу и текущую папку.
-- **PLANS 2.3 (массовая выгрузка всех локальных файлов при повторном запуске)**: на текущем коде не воспроизводится; поведение закреплено тестом.
+
+### Проверено
+- **PLANS 2.3 (массовая выгрузка всех локальных файлов при повторном запуске)** — не баг-фикс: на текущем коде проблема не воспроизводится, поведение закреплено тестом `test_startup_scan_no_requeue.py`.
 
 ### Новое
 - **Контекстное меню в пустой области дерева** (PLANS 1.3): «Сохранить на компьютере», «Новая папка», «Вставить», «Обновить»; «Сохранить» работает по текущей папке, на корне не сканирует всю БД и отключён.
@@ -16,7 +18,7 @@
 - **Ctrl+F** (PLANS 1.7): закреплено тестом — действие зарегистрировано в окне, контекст `WindowShortcut`, `triggered` ведёт в `_focus_search`.
 
 ### Тесты
-- Новые файлы: `test_upload_worker_md5.py`, `test_upload_race_conflict.py`, `test_db_vanished.py`, `test_db_missing_cloud.py`, `test_vanished_resolve.py`, `test_vanished_ui.py`, `test_folder_load_vanished.py`, `test_startup_scan_no_requeue.py`, `test_offline_tree.py`, `test_watcher_new_files.py`, `test_upload_flush_delay.py`, `test_tree_context_menu_empty.py`, `test_tree_keyboard.py`, `test_search_shortcut.py`.
+- Новые файлы: `test_upload_worker_md5.py`, `test_upload_race_conflict.py`, `test_db_vanished.py`, `test_db_missing_cloud.py`, `test_vanished_resolve.py`, `test_vanished_ui.py`, `test_folder_load_vanished.py`, `test_startup_scan_no_requeue.py`, `test_offline_tree.py`, `test_watcher_new_files.py`, `test_upload_flush_delay.py`, `test_tree_context_menu_empty.py`, `test_tree_keyboard.py`, `test_search_shortcut.py`. Также изменён существующий `tests/test_all_files_thread.py` (проверки vanished-скана и усечённого листинга). Всего в прогоне **402** теста.
 
 ## v0.12.7 (2026-10-24)
 

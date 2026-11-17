@@ -1,7 +1,7 @@
 # ☁️ YaDisk Manager — Дизайн-документ
 
 > Версия: 0.13.0
-> Дата: 2026-10-20
+> Дата: 2026-11-17
 > Цель: создать рабочую копию программы «Яндекс Диск» 3.0 для ПК, не требующую подписки Яндекс 360
 
 ---
@@ -661,7 +661,7 @@ D:\Program_Files\YaDiskManager\
 | Компонент | Что изменилось |
 |----------|----------------|
 | `MainWindow._build_tree_empty_menu()` | Контекстное меню ПКМ по пустой области дерева: «Сохранить на компьютере» (по `_current_path`, на корне отключено и без агрегации всей БД), «Новая папка», «Вставить» (при заполненном буфере), «Обновить» |
-| `MainWindow._handle_tree_key()` + event filter | F2 переименовывает выделенную папку (корень защищён), Enter открывает её; для корня/без выделения/неизвестного узла возвращается `False`, и клавиша уходит в `QTreeView` (стрелки, expand/collapse, type-ahead) |
+| `MainWindow._handle_tree_key()` + event filter | F2 переименовывает выделенную папку (корень защищён) и **всегда** возвращает `True` — клавиша потребляется, включая корень и пустое выделение. Enter открывает выделенную папку; для корня, пустого выделения и неизвестного узла возвращает `False`, и клавиша уходит в `QTreeView` (стрелки, expand/collapse, type-ahead) |
 | Ctrl+F | `QAction` «Поиск» добавлен в окно (`WindowShortcut`), `triggered → _focus_search()` (фокус + `selectAll`) |
 
 ### Тесты
@@ -672,6 +672,7 @@ D:\Program_Files\YaDiskManager\
 | `tests/test_db_vanished.py`, `test_db_missing_cloud.py`, `test_vanished_resolve.py`, `test_vanished_ui.py`, `test_folder_load_vanished.py` | vanished-записи из БД, решения резолвера (delete/move/conflict/drop), применение в UI, защита `_recently_uploaded` |
 | `tests/test_offline_tree.py`, `test_watcher_new_files.py`, `test_startup_scan_no_requeue.py` | Офлайн-дерево и переподключение, новые файлы вне Менеджера (нормализация пути), отсутствие повторной постановки в upload при старте |
 | `tests/test_tree_context_menu_empty.py`, `test_tree_keyboard.py`, `test_search_shortcut.py` | Пустое меню дерева, F2/Enter и проброс необработанных клавиш, Ctrl+F |
+| `tests/test_all_files_thread.py` (изменён) | Проверки vanished-скана полного обхода и пропуска проверки при усечённом листинге. Всего в прогоне **402** теста |
 
 ---
 
