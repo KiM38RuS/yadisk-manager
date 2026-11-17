@@ -4008,6 +4008,12 @@ class MainWindow(QMainWindow):
                     and event.type() == QEvent.KeyPress):
                 return self._handle_table_key(event)
 
+            # ── Клавиатурные события для дерева папок ──────────────────────────
+            if (hasattr(self, 'tree_view') and self.tree_view is not None
+                    and obj is self.tree_view
+                    and event.type() == QEvent.KeyPress):
+                return self._handle_tree_key(event)
+
             # ── Drag-and-drop (внешний + внутренний) ───────────────────────────
             _INTERNAL_MIME = 'application/x-yadisk-cloud-paths'
             etype = event.type()
@@ -5520,6 +5526,38 @@ class MainWindow(QMainWindow):
 
         return False  # не обработано — пусть Qt разберётся
 
+    def _handle_tree_key(self, event) -> bool:
+        """Обработать клавиатурное событие в дереве папок (PLANS 1.6).
+
+        F2 — переименовать выделенную папку, Enter — открыть её.
+        Возвращает True только если событие действительно обработано:
+        стрелки, type-ahead и expand/collapse должны дойти до QTreeView.
+        """
+        key = event.key()
+
+        # F2 — переименовать. Корень («Яндекс Диск», "/") не переименовываем:
+        # move("/") попытался бы переместить весь Диск. Клавишу при этом
+        # потребляем — иначе Qt пищит на необработанный F2.
+        if key == Qt.Key_F2:
+            self._rename_tree_selected()
+            return True
+
+        # Enter — открыть выделенную папку (как двойной клик). Без выделения,
+        # для неизвестного узла и для корня возвращаем False: навигация на "/"
+        # лишь перезагрузила бы ту же папку, а Qt должен штатно развернуть
+        # или свернуть узел.
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            rows = self.tree_view.selectionModel().selectedRows(0)
+            if not rows:
+                return False
+            item = self.tree_model._find_item(rows[0].data(Qt.UserRole) or "")
+            if not item or item.cloud_path in ("", "/"):
+                return False
+            self._navigate_to_folder(item.cloud_path)
+            return True
+
+        return False  # не обработано — пусть Qt разберётся
+
     def _select_all_files(self):
         """Выделить все строки таблицы, кроме служебной «..» (PLANS 2.5).
 
@@ -5570,6 +5608,20 @@ class MainWindow(QMainWindow):
                     )
                     self.table_view.scrollTo(proxy_idx)
                 break
+
+    def _rename_tree_selected(self) -> None:
+        """Переименовать выделенную в дереве папку (F2, PLANS 1.6)."""
+        rows = self.tree_view.selectionModel().selectedRows(0)
+        if not rows:
+            return
+        cp = rows[0].data(Qt.UserRole) or ""
+        # Корень и пустой путь не переименовываем — это не папка-ребёнок.
+        if cp in ("", "/"):
+            return
+        item = self.tree_model._find_item(cp)
+        if not item or item.cloud_path in ("", "/"):
+            return
+        self._rename_item(item.cloud_path, item.name, "dir")
 
     def _rename_selected(self):
         """Переименовать выделенный в таблице файл/папку (F2)."""
