@@ -33,7 +33,7 @@ def _save_action(menu):
 
 def test_empty_tree_area_has_context_menu(qapp):
     import ui as ui_mod
-    from PySide6.QtCore import QModelIndex, QPoint
+    from PySide6.QtCore import QModelIndex
 
     mw = MagicMock()
     mw.tree_view.indexAt.return_value = QModelIndex()
@@ -118,6 +118,28 @@ def test_invalid_index_opens_empty_menu(qapp):
 
     mw._build_tree_empty_menu.assert_called_once_with()
     mock_menu.exec.assert_called_once_with(global_pos)
+
+
+def test_empty_menu_save_action_binds_current_folder_helper(qapp):
+    """«Сохранить на компьютере» из пустой области привязан к helper'у
+    текущей папки, а не к selection-based _save_to_computer (ruling A)."""
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._current_path = "/Photos"
+    mw._clipboard_buffer = []
+    mw._db.get_folder_aggregate_status.return_value = "cloud_only"
+
+    menu = ui_mod.MainWindow._build_tree_empty_menu(mw)
+    action = _save_action(menu)
+    assert action.isEnabled()
+
+    # QAction.trigger() эмитит triggered(bool); PySide6 обрезает аргумент
+    # для обработчика без параметров (и MagicMock его принимает).
+    action.trigger()
+
+    mw._save_current_folder_to_computer.assert_called_once()
+    mw._save_to_computer.assert_not_called()
 
 
 def test_save_current_folder_targets_current_path(qapp):
