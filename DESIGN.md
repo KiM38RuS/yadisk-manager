@@ -1,6 +1,6 @@
 # ☁️ YaDisk Manager — Дизайн-документ
 
-> Версия: 0.12.5
+> Версия: 0.13.0
 > Дата: 2026-10-20
 > Цель: создать рабочую копию программы «Яндекс Диск» 3.0 для ПК, не требующую подписки Яндекс 360
 
@@ -621,6 +621,57 @@ D:\Program_Files\YaDiskManager\
     ├── 0.3/
     └── ...
 ```
+
+---
+
+## Изменения v0.12.7 — v0.13.0
+
+### Синхронизация: upload
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `UploadWorker.finished(str, str)` | Второй аргумент — MD5 байтов, реально отправленных в PUT (`hashlib.md5()` обновляется в генераторе чанков), а не содержимое файла на момент завершения. `_do_upload.on_finished` кладёт его в очередь результатов как `(cloud_path, local_path, sent_md5, "upload", False)` |
+| `MainWindow._process_result_queue()` | Пишет в БД `md5`/`last_sync_md5` = `sent_md5`. Снимок `(size, mtime_ns)` в `_upload_stamps` снимается перед стартом воркера: если после upload он не изменился, `_md5_file()` не вызывается; иначе локальный MD5 сравнивается с `sent_md5`, и при расхождении путь попадает в `_dirty_uploads` |
+| `MainWindow._requeue_dirty_uploads()` | Отложенно (`QTimer.singleShot(0)`, уже после записи метаданных текущего upload) переносит dirty-пути в `_pend_upload` и запускает flush — повторная выгрузка без диалога конфликта |
+| `_recently_downloaded` / `_recently_uploaded` | Наборы-«глушилки» ложных watcher-событий: скачивание/выгрузка не должна выглядеть локальным изменением. `_recently_uploaded` живёт 30 с и дополнительно отсекает устаревший облачный листинг в `VanishedResolveThread` |
+| `UPLOAD_FLUSH_DELAY_MS = 250`, `UPLOAD_FLUSH_MAX_WAIT_MS = 1000` | Debounce авто-выгрузки снижен с 2000 мс; `_schedule_upload_flush()` перезапускает single-shot таймер, но общее ожидание ограничено потолком (при достижении — `start(0)`), чтобы непрерывные события (bulk copy/unzip) не блокировали старт выгрузки. Конфликтная ветка «оставить локально» использует тот же таймер |
+
+### Синхронизация: удаления/перемещения с другого ПК
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `Database.sync_children_from_api()` | Возвращает `vanished` — локально скачанные файлы, которых нет в ответе API; в записи добавлен `status`. Сами записи в БД не удаляются: решение принимает `VanishedResolveThread`. Записи `syncing` исключены из prune и vanished |
+| `Database.get_local_files_not_in()` | Возвращает `status` вместе с `cloud_path`/`local_path`/`md5`/`last_sync_md5` — для bulk-прохода `AllFilesThread` |
+| `Database.find_file_by_md5(md5, parent_path, exclude_path)` | Ищет облачную запись без локальной копии в той же папке — сопоставление перемещения (новое имя, тот же контент) |
+| `VanishedResolveThread` (`ui_threads.py`) | Для каждой vanished-записи: локальной копии нет → `drop`; MD5 не менялся → `delete`; найден `find_file_by_md5` → `move`; локально изменён или `status='modified'` → `conflict`. Тяжёлый MD5 считается в фоне |
+| `MainWindow._on_vanished_resolved()` | Применяет решения в UI-потоке: `delete` удаляет файл и запись; `move` переносит копию (`os.replace`, при занятой цели — сравнение MD5, чужие данные не перезаписываются), обновляет БД; `conflict` → `_handle_remote_delete_conflict()`. Пропускает пути из `_recently_uploaded` (и `move` в такой путь). Копит `_vanished_pending`, чтобы не плодить параллельные потоки |
+| `_handle_remote_delete_conflict()` | «Оставить локально» → `update_last_sync_md5("")`, `status='modified'` и постановка в `_pend_upload` (с debounce); «удалить» → удаление локальной копии и записи |
+| `AllFilesThread.vanished` | Сигнал эмитится только при полном скане с нуля (`started_at_zero`) и непустом облачном списке — пустой ответ API не «удаляет» все локальные копии |
+
+### Офлайн-режим
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `MainWindow._populate_tree_from_db()` | Строит дерево из SQLite при ошибке сети: `db.get_dir_tree_levels()` → `tree_model.populate_children_from_db(..., status_override="unknown")`; корень раскрывается, индикаторы загрузки скрываются |
+| `MainWindow._on_reconnect_tree_loaded()` | При восстановлении связи обновляет только содержимое корня дерева (мерж поверх офлайн-данных), не переключая таблицу на «/» и не сбрасывая текущую папку; при повторной ошибке оставляет дерево из БД |
+| `FolderTreeModel.populate_children_from_db()` | Новый параметр `status_override`: все дети получают заданный статус (для офлайна — `unknown`) |
+
+### UI
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `MainWindow._build_tree_empty_menu()` | Контекстное меню ПКМ по пустой области дерева: «Сохранить на компьютере» (по `_current_path`, на корне отключено и без агрегации всей БД), «Новая папка», «Вставить» (при заполненном буфере), «Обновить» |
+| `MainWindow._handle_tree_key()` + event filter | F2 переименовывает выделенную папку (корень защищён), Enter открывает её; для корня/без выделения/неизвестного узла возвращается `False`, и клавиша уходит в `QTreeView` (стрелки, expand/collapse, type-ahead) |
+| Ctrl+F | `QAction` «Поиск» добавлен в окно (`WindowShortcut`), `triggered → _focus_search()` (фокус + `selectAll`) |
+
+### Тесты
+
+| Компонент | Что изменилось |
+|----------|----------------|
+| `tests/test_upload_worker_md5.py`, `test_upload_race_conflict.py`, `test_upload_flush_delay.py` | MD5 отправленных байтов, повторная выгрузка dirty-файла без конфликта, debounce 250 мс/потолок 1000 мс |
+| `tests/test_db_vanished.py`, `test_db_missing_cloud.py`, `test_vanished_resolve.py`, `test_vanished_ui.py`, `test_folder_load_vanished.py` | vanished-записи из БД, решения резолвера (delete/move/conflict/drop), применение в UI, защита `_recently_uploaded` |
+| `tests/test_offline_tree.py`, `test_watcher_new_files.py`, `test_startup_scan_no_requeue.py` | Офлайн-дерево и переподключение, новые файлы вне Менеджера (нормализация пути), отсутствие повторной постановки в upload при старте |
+| `tests/test_tree_context_menu_empty.py`, `test_tree_keyboard.py`, `test_search_shortcut.py` | Пустое меню дерева, F2/Enter и проброс необработанных клавиш, Ctrl+F |
 
 ---
 

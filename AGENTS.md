@@ -3,7 +3,7 @@
 > Identity: Python developer, PySide6 GUI, REST API integrations.
 > Language: user speaks Russian, code/replies in Russian or English.
 > Knowledge base root: `D:\\YandexDisk\\Sync\\Coding\\AIWikiVault`
-> Current version: **0.12.7** (see `Backup/` for history)
+> Current version: **0.13.0** (see `Backup/` for history)
 >
 > ## 📦 Версии и бэкапы
 >
@@ -365,6 +365,13 @@ triggers:
 Все три слоя используют `_queue_reverse_meta_fetch()` → `MetaFetchThread` → `_on_reverse_meta_fetched()`:
 - Если изменилось только облако → авто-скачивание
 - Если изменилось и локально, и в облаке → конфликт (`_handle_conflict`)
+
+### Синхронизация удалений и перемещений (v0.13.0)
+- `VanishedResolveThread` (`ui_threads.py`) — файл скачан локально, но исчез из облака: локальная копия не менялась → `delete`; рядом есть облачный файл с тем же MD5 (`db.find_file_by_md5`) → `move` (перенос локальной копии, без повторной выгрузки); локально изменён → `conflict` (диалог).
+- `_recently_uploaded` (30 с, `ui.py`) — защита от устаревшего листинга: только что выгруженные файлы не считаются «исчезнувшими».
+- `_dirty_uploads` / `_upload_stamps` — `UploadWorker` отдаёт MD5 реально отправленных байтов; если файл изменился во время upload (`(size, mtime_ns)` в `_upload_stamps`), он помечается dirty и выгружается повторно без диалога. `_recently_downloaded` гасит ложные watcher-события сразу после скачивания.
+- `UPLOAD_FLUSH_DELAY_MS = 250` + `UPLOAD_FLUSH_MAX_WAIT_MS = 1000` — debounce авто-выгрузки; потолок не даёт непрерывным событиям откладывать flush бесконечно.
+- Офлайн-старт: дерево строится из SQLite (`_populate_tree_from_db` → `populate_children_from_db(..., status_override="unknown")`); при восстановлении связи `_on_reconnect_tree_loaded` обновляет только дерево, не сбивая таблицу и текущую папку.
 
 ### run.bat
 - Путь в `run.bat` может отличаться от актуального — поправь при необходимости.
