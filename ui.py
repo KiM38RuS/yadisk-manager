@@ -4796,56 +4796,63 @@ class MainWindow(QMainWindow):
 
     # ── Действия ──────────────────────────────────────────
 
-    def _toggle_local_copy(self, download_mode: bool = True):
+    def _toggle_local_copy(self, download_mode: bool = True,
+                           folder_paths: list[str] | None = None):
         """Переключатель: скачать / удалить локальную копию.
 
         - download_mode=True → скачивать (Сохранить на компьютере)
         - download_mode=False → удалять (Оставить только в облаке)
 
         Вызывается через _save_to_computer() / _leave_only_in_cloud() из тулбара,
-        меню и контекстного меню.
+        меню и контекстного меню. folder_paths — явный список папок (пустая
+        область дерева, PLANS 1.3), когда выделение в UI не должно учитываться.
         """
         to_download: list[str] = []
         to_remove: list[str] = []
         pending_folders: list[str] = []
 
-        # Определяем активную панель по выделению, а не по фокусу —
-        # кнопка тулбара крадёт фокус, и focusWidget() не находит таблицу/дерево
-        table_rows = self.table_view.selectionModel().selectedRows(0)
-        tree_rows = self.tree_view.selectionModel().selectedRows(0)
+        if folder_paths is not None:
+            # Явно заданные папки: не зависит от случайного выделения
+            # в дереве/таблице — таргетим только текущую папку
+            pending_folders = [p for p in folder_paths if p and p != "/"]
+        else:
+            # Определяем активную панель по выделению, а не по фокусу —
+            # кнопка тулбара крадёт фокус, и focusWidget() не находит таблицу/дерево
+            table_rows = self.table_view.selectionModel().selectedRows(0)
+            tree_rows = self.tree_view.selectionModel().selectedRows(0)
 
-        if tree_rows and not table_rows:
-            # Только дерево имеет выделение → обрабатываем папки рекурсивно
-            for idx in tree_rows:
-                cloud_path = idx.data(Qt.UserRole)
-                # Корень диска («Яндекс Диск») — только навигация:
-                # «Сохранить на компьютере» скачала бы весь диск,
-                # «Оставить только в облаке» удалила бы весь локальный кеш
-                if cloud_path and cloud_path != "/":
-                    pending_folders.append(cloud_path)
-        elif table_rows:
-            # Таблица имеет выделение → обрабатываем строки
-            for idx in table_rows:
-                item = self._get_item(idx)
-                if not item:
-                    continue
-                if item.get("is_dir"):
-                    pending_folders.append(item["cloud_path"])
-                else:
-                    if download_mode is True:
-                        # Сохранить на компьютере — только нескачанные
-                        if item["status"] in ("cloud_only", "unknown"):
-                            to_download.append(item["cloud_path"])
-                    elif download_mode is False:
-                        # Оставить только в облаке — только скачанные
-                        if item["status"] == "downloaded":
-                            to_remove.append(item["cloud_path"])
+            if tree_rows and not table_rows:
+                # Только дерево имеет выделение → обрабатываем папки рекурсивно
+                for idx in tree_rows:
+                    cloud_path = idx.data(Qt.UserRole)
+                    # Корень диска («Яндекс Диск») — только навигация:
+                    # «Сохранить на компьютере» скачала бы весь диск,
+                    # «Оставить только в облаке» удалила бы весь локальный кеш
+                    if cloud_path and cloud_path != "/":
+                        pending_folders.append(cloud_path)
+            elif table_rows:
+                # Таблица имеет выделение → обрабатываем строки
+                for idx in table_rows:
+                    item = self._get_item(idx)
+                    if not item:
+                        continue
+                    if item.get("is_dir"):
+                        pending_folders.append(item["cloud_path"])
                     else:
-                        # Авто-определение (тулбар)
-                        if item["status"] in ("cloud_only", "unknown"):
-                            to_download.append(item["cloud_path"])
+                        if download_mode is True:
+                            # Сохранить на компьютере — только нескачанные
+                            if item["status"] in ("cloud_only", "unknown"):
+                                to_download.append(item["cloud_path"])
+                        elif download_mode is False:
+                            # Оставить только в облаке — только скачанные
+                            if item["status"] == "downloaded":
+                                to_remove.append(item["cloud_path"])
                         else:
-                            to_remove.append(item["cloud_path"])
+                            # Авто-определение (тулбар)
+                            if item["status"] in ("cloud_only", "unknown"):
+                                to_download.append(item["cloud_path"])
+                            else:
+                                to_remove.append(item["cloud_path"])
 
         if pending_folders:
             # Определяем режим: скачивание или удаление
@@ -4887,6 +4894,17 @@ class MainWindow(QMainWindow):
     def _save_to_computer(self):
         """Сохранить выделенные файлы/папки на компьютер."""
         self._toggle_local_copy(download_mode=True)
+
+    def _save_current_folder_to_computer(self):
+        """Сохранить текущую папку (ПКМ по пустому месту дерева, PLANS 1.3).
+
+        Не зависит от случайного выделения в дереве/таблице — всегда таргетим
+        self._current_path. Корень диска игнорируется (скачал бы весь диск).
+        """
+        cur = self._current_path or ""
+        if not cur or cur == "/":
+            return
+        self._toggle_local_copy(download_mode=True, folder_paths=[cur])
 
     def _leave_only_in_cloud(self):
         """Удалить локальную копию выделенных файлов/папок."""
@@ -6062,10 +6080,43 @@ class MainWindow(QMainWindow):
         act = menu.addAction("Удалить", self._delete_selected)
         act.setIcon(_svg_icon("trash.svg", 24))
 
+    def _build_tree_empty_menu(self) -> QMenu:
+        """ПКМ по пустому месту дерева: действия для текущей папки (PLANS 1.3).
+
+        Агрегат статуса "/" — полносканирование БД, поэтому на корне не
+        запрашиваем его и сразу отключаем «Сохранить на компьютере».
+        """
+        menu = QMenu(self)
+        cur = self._current_path or ""
+        if cur and cur != "/":
+            can_save = self._db.get_folder_aggregate_status(cur) != "downloaded"
+        else:
+            can_save = False
+
+        act = menu.addAction("Сохранить на компьютере",
+                             self._save_current_folder_to_computer)
+        act.setIcon(_svg_icon("loaded.svg", 24))
+        act.setEnabled(can_save)
+
+        act = menu.addAction("Новая папка", self._create_folder)
+        act.setIcon(_svg_icon("folder-add.svg", 24))
+
+        if self._clipboard_buffer:
+            act = menu.addAction("Вставить", self._paste_from_buffer)
+            act.setIcon(_svg_icon("paste.svg", 24))
+
+        menu.addSeparator()
+
+        act = menu.addAction("Обновить", self.refresh_current)
+        act.setIcon(_svg_icon("refresh.svg", 24))
+        return menu
+
     def _on_tree_context_menu(self, pos):
         """Контекстное меню для дерева папок."""
         index = self.tree_view.indexAt(pos)
         if not index.isValid():
+            self._build_tree_empty_menu().exec(
+                self.tree_view.viewport().mapToGlobal(pos))
             return
         cloud_path = index.data(Qt.UserRole)
         if not cloud_path:
