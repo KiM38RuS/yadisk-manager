@@ -1286,7 +1286,12 @@ class Database:
         for folder in folder_paths:
             st = acc.get(folder)
             if st is None:
-                result[folder] = "cloud_only"
+                # Нет файлов — проверяем, есть ли запись самой папки (пустая папка)
+                folder_row = self._read_conn.execute(
+                    "SELECT status FROM files WHERE cloud_path=? AND type='dir'",
+                    (folder,)
+                ).fetchone()
+                result[folder] = folder_row["status"] if folder_row else "cloud_only"
             elif "deleting" in st:
                 result[folder] = "deleting"
             elif "syncing" in st:

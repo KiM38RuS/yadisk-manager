@@ -19,11 +19,12 @@ from queue import Queue, Empty
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, QSize, QEvent, QRect, QPoint, QModelIndex, QByteArray, QItemSelection, QItemSelectionModel, QUrl, QRectF, QMimeData, QStringListModel
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtGui import (
     QAction, QIcon, QFont, QColor, QPalette, QBrush,
     QFontDatabase, QShortcut, QKeySequence, QPixmap,
     QPainter, QLinearGradient, QMovie, QGuiApplication,
-    QDesktopServices, QDrag, QCursor, QImage, qRgba,
+    QDesktopServices, QDrag, QCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -92,6 +93,27 @@ logger = logging.getLogger(__name__)
 
 from _version import VERSION
 import updater
+
+# Имя в заголовке окна и трее (было «YaDisk Manager» — инбокс PLANS)
+APP_NAME = "ЯДиск Менеджер"
+
+# Статус для тултипа трея. Ключ «ready» — готовность, бейдж на иконке не рисуется.
+APP_STATUS_TEXT = {
+    "ready": "Статус: готово",
+    "syncing": "Статус: синхронизация",
+    "offline": "Статус: нет соединения",
+    "conflict": "Статус: ошибка синхронизации",
+}
+
+# SVG-бейджи в правом нижнем углу иконки трея (размер — 1/2 иконки)
+APP_STATUS_BADGE_SVG = {
+    "syncing": "synchronize.svg",
+    "offline": "close-red.svg",
+    "conflict": "error-badge.svg",
+}
+
+# Текст кликабельной надписи в строке состояния (PLANS 3.12)
+CONFLICT_LABEL_TEXT = "⚠️ Конфликт с облаком"
 
 # Интервал полного опроса всех файлов для детекции изменений в облаке (15 мин)
 BULK_SYNC_INTERVAL_MS = 900000
@@ -222,6 +244,9 @@ class MainWindow(QMainWindow):
         self._pending_download_notifs: list[str] = []
         self._pending_upload_notifs: list[str] = []
         self._notif_timer = None
+        # Неразрешённые конфликты (PLANS 3.12): диалог не открывается сразу,
+        # вместо этого — уведомление в трее и надпись в строке состояния
+        self._pending_conflicts: list[dict] = []
         self._toggle_state = None  # legacy — kept for safety
         self._first_close_hint = True  # показать уведомление в трее при первом сворачивании
         self._force_close = False  # True = реальный выход, не сворачивание
@@ -831,7 +856,7 @@ class MainWindow(QMainWindow):
     # ── UI setup ──────────────────────────────────────────
 
     def _init_ui(self):
-        self.setWindowTitle("YaDisk Manager")
+        self.setWindowTitle(f"{APP_NAME} {VERSION}")
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
         self._update_app_icons()
@@ -1021,6 +1046,18 @@ class MainWindow(QMainWindow):
         self._loading_label = QLabel("")
         self._loading_label.hide()
         self._status_right_layout.addWidget(self._loading_label)
+
+        # Конфликт с облаком (PLANS 3.12): кликабельная надпись слева от
+        # «Показать лог», по клику открывается окно разрешения конфликта.
+        self._conflict_label = QLabel(CONFLICT_LABEL_TEXT)
+        self._conflict_label.setCursor(Qt.PointingHandCursor)
+        self._conflict_label.setStyleSheet(
+            "QLabel { color: #E53935; padding: 0 4px; } "
+            "QLabel:hover { text-decoration: underline; }")
+        self._conflict_label.mousePressEvent = \
+            lambda e: self._on_conflict_label_clicked()
+        self._conflict_label.hide()
+        self._status_right_layout.addWidget(self._conflict_label)
 
         self._log_label = QLabel("Показать лог")
         self._log_label.setCursor(Qt.PointingHandCursor)
@@ -1925,8 +1962,9 @@ class MainWindow(QMainWindow):
 
     def _init_tray(self):
         self._tray = QSystemTrayIcon(self)
+        # _update_app_icons → _refresh_app_status ставит тултип с именем,
+        # версией и текущим статусом (три строки)
         self._update_app_icons(update_tray_only=True)
-        self._tray.setToolTip("YaDisk Manager")
 
         self._tray_menu = QMenu(self)
         self._tray_act_show = QAction("Показать окно", self)
@@ -1992,53 +2030,88 @@ class MainWindow(QMainWindow):
         return QIcon()
 
     @classmethod
-    def _pick_tray_icon(cls, force_offline: bool = False) -> QIcon:
-        """Иконка для системного трея — 16px с учётом темы (светлая/тёмная).
-        Если force_offline=True — возвращает полупрозрачную версию иконки."""
+    def _pick_tray_icon(cls, status: str = "ready") -> QIcon:
+        """Иконка трея с учётом темы + бейдж 1/2 размера в правом нижнем углу.
+
+        Бейдж рисуется для всех состояний, кроме «готовности» (ready):
+        стрелки — синхронизация, красный крестик — нет соединения,
+        красный восклицательный знак — ошибка синхронизации (конфликт).
+        Рисуем в 32px, чтобы 16px бейдж не превращался в нечитаемую точку
+        после масштабирования системным треем до 16px.
+        """
         ico = "icon-light-16.ico" if cls._is_windows_dark_mode() else "icon-16.ico"
         path = os.path.join(os.path.dirname(__file__), "Assets", ico)
         base_path = path if os.path.isfile(path) else None
-        
+
         # fallback на icon-main.ico если 16px нет
         if base_path is None:
             fallback = os.path.join(os.path.dirname(__file__), "icon-main.ico")
             if os.path.isfile(fallback):
                 base_path = fallback
-        
-        if base_path is None:
-            return QIcon()
-        
-        if not force_offline:
-            return QIcon(base_path)
-        
-        # Создаём полупрозрачную версию иконки
-        pixmap = QPixmap(base_path)
-        if pixmap.isNull():
-            return QIcon(base_path)
-        
-        # Конвертируем в QImage для манипуляции с альфа-каналом
-        image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
-        
-        # Делаем изображение полупрозрачным (альфа-канал ~50%)
-        # pixel() в ARGB32 возвращает 0xAARRGGBB: альфа — старший байт
-        for y in range(image.height()):
-            for x in range(image.width()):
-                pixel = image.pixel(x, y)
-                alpha = (pixel >> 24) & 0xFF
-                new_alpha = int(alpha * 0.5)
-                image.setPixel(x, y, qRgba(
-                    (pixel >> 16) & 0xFF,
-                    (pixel >> 8) & 0xFF,
-                    pixel & 0xFF,
-                    new_alpha))
 
-        return QIcon(QPixmap.fromImage(image))
+        base_icon = QIcon(base_path) if base_path else QIcon()
+        if status == "ready" or status not in APP_STATUS_BADGE_SVG:
+            return base_icon
+
+        pixmap = base_icon.pixmap(QSize(32, 32))
+        if pixmap.isNull():
+            return base_icon
+
+        size = 32
+        badge = size // 2
+        rect = QRect(size - badge, size - badge, badge, badge)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if status in ("offline", "conflict"):
+            # Красные значки без подложки на светлой иконке не читаются — белый диск
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor("#ffffff"))
+            painter.drawEllipse(rect.adjusted(1, 1, -1, -1))
+        renderer = QSvgRenderer(os.path.join(
+            os.path.dirname(__file__), "Assets", APP_STATUS_BADGE_SVG[status]))
+        if renderer.isValid():
+            renderer.render(painter, QRectF(rect))
+        painter.end()
+        return QIcon(pixmap)
+
+    def _app_status(self) -> str:
+        """Текущее состояние приложения для тултипа/бейджа трея."""
+        if not getattr(self, "_online", True):
+            return "offline"
+        if getattr(self, "_pending_conflicts", None):
+            return "conflict"
+        if (getattr(self, "_syncing", None)
+                or getattr(self, "_active_uploads", 0)
+                or getattr(self, "_active_downloads", 0)
+                or getattr(self, "_upload_queue", None)
+                or getattr(self, "_download_queue", None)
+                or getattr(self, "_bulk_sync_running", False)):
+            return "syncing"
+        return "ready"
+
+    def _refresh_app_status(self, force: bool = False):
+        """Обновить заголовок окна, тултип и иконку трея при смене статуса.
+
+        Иконка пересоздаётся только при реальной смене статуса: регулярное
+        пересоздание QIcon/QPixmap накапливает аллокации в Qt-куче
+        (в коде уже были сбои 0xc0000374 из-за таких обновлений).
+        """
+        status = self._app_status()
+        if not force and getattr(self, "_app_status_current", None) == status:
+            return
+        self._app_status_current = status
+
+        self.setWindowTitle(f"{APP_NAME} {VERSION}")
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.setToolTip(
+                f"{APP_NAME}\nВерсия: {VERSION}\n{APP_STATUS_TEXT[status]}")
+            tray.setIcon(self._pick_tray_icon(status))
 
     def _update_app_icons(self, update_tray_only: bool = False):
         if not update_tray_only:
             self.setWindowIcon(self._pick_window_icon())
-        if hasattr(self, "_tray") and self._tray:
-            self._tray.setIcon(self._pick_tray_icon(force_offline=not self._online))
+        self._refresh_app_status(force=True)
         # Обновляем иконки в меню трея (после смены темы)
         # Обновление выполняется только если не update_tray_only=False (т.е. при полной смене темы),
         # чтобы избежать лишних обновлений при проверке подключения
@@ -2095,7 +2168,7 @@ class MainWindow(QMainWindow):
         переключение в другое окно не должно делать лог невидимым (раньше
         lw.lower() уводил его на дно z-order, под окно Менеджера); активное
         чужое окно накроет лог само, если окна перекрываются. Лог прячется
-        только вместе со сворачиванием Менеджера (_on_manager_state_change).
+        вместе со сворачиванием/закрытием Менеджера в трей.
         Клик по логу поднимает его над Менеджером — «всегда поверх» нет."""
         lw = getattr(self, '_log_window', None)
         if lw is None or not lw.isVisible() or self.isMinimized():
@@ -2108,59 +2181,33 @@ class MainWindow(QMainWindow):
             if QApplication.activeWindow() is lw:
                 QTimer.singleShot(0, self.activateWindow)
 
-    def _on_manager_state_change(self):
-        """При сворачивании Менеджера прятать окно лога (у него нет значка
-        на панели задач — вернуть его можно только вместе с Менеджером)."""
-        lw = getattr(self, '_log_window', None)
-        if lw is None:
-            return
-        if self.isMinimized():
-            if lw.isVisible():
-                self._log_visible_before_minimize = True
-                lw.hide()
-        else:
-            if getattr(self, '_log_visible_before_minimize', False):
-                self._log_visible_before_minimize = False
-                lw.show()
-                lw.raise_()
-                self.raise_()
+    def _hide_log_with_manager(self):
+        """Скрыть лог при сворачивании или закрытии Менеджера в трей.
 
-    def _sync_log_zorder(self):
-        """Спутник окна лога: при активации Менеджера (Alt+Tab, значок на
-        панели задач, клик по окну) лог поднимается на передний план сразу
-        за Менеджером. При потере фокуса лог НЕ опускается и НЕ прячется:
-        переключение в другое окно не должно делать лог невидимым (раньше
-        lw.lower() уводил его на дно z-order, под окно Менеджера); активное
-        чужое окно накроет лог само, если окна перекрываются. Лог прячется
-        только вместе со сворачиванием Менеджера (_on_manager_state_change).
-        Клик по логу поднимает его над Менеджером — «всегда поверх» нет."""
-        lw = getattr(self, '_log_window', None)
-        if lw is None or not lw.isVisible() or self.isMinimized():
+        У окна лога нет значка на панели задач — вернуть его можно только
+        вместе с Менеджером, поэтому запоминаем, было ли оно видимым.
+        """
+        lw = getattr(self, "_log_window", None)
+        if lw is not None and lw.isVisible():
+            self._log_visible_before_minimize = True
+            lw.hide()
+
+    def _restore_log_with_manager(self):
+        """Вернуть окно лога, если оно было видно до скрытия Менеджера."""
+        lw = getattr(self, "_log_window", None)
+        if lw is None or not getattr(self, "_log_visible_before_minimize", False):
             return
-        if self.isActiveWindow():
-            lw.raise_()
-            self.raise_()
-            # Подстраховка: raise() меняет z-order без смены фокуса, но если
-            # Windows всё же отдал фокус логу — вернуть его Менеджеру.
-            if QApplication.activeWindow() is lw:
-                QTimer.singleShot(0, self.activateWindow)
+        self._log_visible_before_minimize = False
+        lw.show()
+        lw.raise_()
+        self.raise_()
 
     def _on_manager_state_change(self):
-        """При сворачивании Менеджера прятать окно лога (у него нет значка
-        на панели задач — вернуть его можно только вместе с Менеджером)."""
-        lw = getattr(self, '_log_window', None)
-        if lw is None:
-            return
+        """Сворачивание/разворачивание Менеджера → скрыть/вернуть окно лога."""
         if self.isMinimized():
-            if lw.isVisible():
-                self._log_visible_before_minimize = True
-                lw.hide()
+            self._hide_log_with_manager()
         else:
-            if getattr(self, '_log_visible_before_minimize', False):
-                self._log_visible_before_minimize = False
-                lw.show()
-                lw.raise_()
-                self.raise_()
+            self._restore_log_with_manager()
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.ActivationChange:
@@ -2264,7 +2311,7 @@ class MainWindow(QMainWindow):
         self._update_offered = True
         self._tray.showMessage(
             "Доступно обновление",
-            f"YaDisk Manager {info.version}. Нажмите, чтобы обновить "
+            f"{APP_NAME} {info.version}. Нажмите, чтобы обновить "
             f"(займёт меньше минуты).",
             QSystemTrayIcon.Information, 15000)
         logger.info("Update available: %s", info.version)
@@ -2356,6 +2403,10 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        # Окно лога было скрыто вместе с Менеджером (сворачивание/закрытие) —
+        # возвращаем его; при разворачивании из minimized флаг уже сброшен
+        # в _on_manager_state_change, поэтому вызов будет холостым.
+        self._restore_log_with_manager()
 
     def _tray_exit(self):
         """Полностью закрыть программу (Выход из трея)."""
@@ -3168,9 +3219,17 @@ class MainWindow(QMainWindow):
         # Файл уже синхронизирован с облаком — пропускаем загрузку
         if cloud_md5 and cloud_md5 == local_md5:
             logger.debug("File already in sync, skipping upload: %s", cloud_path)
-            # Обновляем last_sync_md5 на случай, если он был пуст
-            # (миграция со старых версий, где last_sync_md5 не записывался)
-            self._db.update_last_sync_md5(cloud_path, cloud_md5)
+            # Watcher мог поставить status='syncing' ещё до MetaFetch
+            # (modified без реального изменения содержимого). Раз upload
+            # не нужен — возвращаем файл в downloaded, иначе он навсегда
+            # останется «Синхронизация», хотя MD5 уже совпадает с облаком.
+            # set_downloaded также обновляет last_sync_md5 (в т.ч. после
+            # миграции со старых версий, где поле было пустым).
+            self._db.set_downloaded(cloud_path, local_path,
+                                    last_sync_md5=cloud_md5)
+            self._syncing.discard(cloud_path)
+            self.table_model.update_status(cloud_path, "downloaded")
+            self._update_tree_status(cloud_path)
             return
 
         # ── загружаем ────────────────────────────────────
@@ -3179,7 +3238,11 @@ class MainWindow(QMainWindow):
     def _handle_conflict(self, cloud_path, local_path,
                          local_md5: str, cloud_md5: str,
                          cloud_size: int = 0, cloud_modified: str = ""):
-        """Диалог конфликта — локальный и облачный файл изменились."""
+        """Конфликт зафиксирован: уведомление в трее + надпись в статус-баре.
+
+        Окно Менеджера не поднимается и диалог не открывается сразу — только
+        по клику по надписи «⚠️ Конфликт с облаком» (PLANS 3.12).
+        """
         # Offscreen / headless (интеграционные тесты) — авто-отмена, не блокировать
         if QGuiApplication.platformName() == "offscreen":
             logger.warning(
@@ -3190,8 +3253,74 @@ class MainWindow(QMainWindow):
             self._db.update_last_sync_md5(cloud_path, cloud_md5)
             return
 
-        self._tray_show()  # показываем окно если свёрнуто
+        self._register_conflict(
+            cloud_path, local_path, local_md5, cloud_md5,
+            cloud_size=cloud_size, cloud_modified=cloud_modified)
 
+    def _register_conflict(self, cloud_path: str, local_path: str,
+                           local_md5: str, cloud_md5: str,
+                           cloud_size: int = 0,
+                           cloud_modified: str = "") -> None:
+        """Запомнить конфликт, показать трей-уведомление и надпись в статус-баре."""
+        conflicts = getattr(self, "_pending_conflicts", None)
+        if conflicts is None:
+            conflicts = []
+            self._pending_conflicts = conflicts
+        if any(c["cloud_path"] == cloud_path for c in conflicts):
+            return  # уже ждёт разрешения — не дублируем
+        conflicts.append({
+            "cloud_path": cloud_path,
+            "local_path": local_path,
+            "local_md5": local_md5,
+            "cloud_md5": cloud_md5,
+            "cloud_size": cloud_size,
+            "cloud_modified": cloud_modified,
+        })
+        self._set_conflict_indicator(True)
+        self._refresh_app_status()
+        name = os.path.basename(cloud_path.rstrip("/")) or cloud_path
+        self._notify(
+            "Конфликт синхронизации",
+            f"{name}: файл изменён и локально, и в облаке. "
+            f"Нажмите «{CONFLICT_LABEL_TEXT}» в строке состояния, "
+            f"чтобы выбрать версию.",
+            QSystemTrayIcon.Warning)
+
+    def _set_conflict_indicator(self, active: bool) -> None:
+        """Показать/скрыть надпись «⚠️ Конфликт с облаком» в статус-баре."""
+        label = getattr(self, "_conflict_label", None)
+        if label is None:
+            return
+        if active:
+            label.setText(CONFLICT_LABEL_TEXT)
+            label.show()
+        else:
+            label.hide()
+
+    def _on_conflict_label_clicked(self) -> None:
+        """Клик по надписи — поднять окно и открыть диалог первого конфликта."""
+        conflicts = getattr(self, "_pending_conflicts", None)
+        if not conflicts:
+            return
+        conflict = conflicts[0]
+        self._tray_show()
+        self._show_conflict_dialog(**conflict)
+
+    def _clear_pending_conflict(self) -> None:
+        """Убрать один разрешённый конфликт и обновить индикацию."""
+        conflicts = getattr(self, "_pending_conflicts", None)
+        if conflicts:
+            conflicts.pop(0)
+        self._set_conflict_indicator(bool(conflicts))
+        self._refresh_app_status()
+
+    def _show_conflict_dialog(self, cloud_path, local_path,
+                              local_md5: str, cloud_md5: str,
+                              cloud_size: int = 0, cloud_modified: str = ""):
+        """Диалог выбора версии — открывается только по клику по надписи.
+
+        Окно поднимает вызывающий `_on_conflict_label_clicked`.
+        """
         try:
             st = os.stat(local_path)
             local_size = st.st_size
@@ -3267,14 +3396,17 @@ class MainWindow(QMainWindow):
             # не показал тот же конфликт ещё раз
             if local_md5:
                 self._db.update_last_sync_md5(cloud_path, local_md5)
+            self._clear_pending_conflict()
             self._start_upload(cloud_path, local_path, local_md5)
         elif msg.clickedButton() == btn_no:
             # Скачиваем облачную, перезаписываем локальную
             # Немедленно обновляем last_sync_md5 = cloud_md5, чтобы
             # любые последующие MetaFetch видели файл синхронизированным
             self._db.update_last_sync_md5(cloud_path, cloud_md5)
+            self._clear_pending_conflict()
             self._start_download(cloud_path, local_path)
-        # Отмена — ничего не делаем
+        # Отмена — конфликт остаётся в списке: надпись и статус «ошибка
+        # синхронизации» не пропадают, диалог можно открыть ещё раз
 
     def _start_upload(self, cloud_path: str, local_path: str,
                       local_md5: str = ""):
@@ -3289,6 +3421,7 @@ class MainWindow(QMainWindow):
             return
 
         self._syncing.add(cloud_path)
+        self._refresh_app_status()
         # Сразу показываем статус 🔄 в таблице
         self.table_model.update_status(cloud_path, "syncing")
         # Показываем статус 🔄 в дереве
@@ -3356,6 +3489,7 @@ class MainWindow(QMainWindow):
             return
 
         self._syncing.add(cloud_path)
+        self._refresh_app_status()
         # Идёт скачивание — события watcher по этому файлу игнорируем,
         # чтобы не принять запись DownloadWorker за локальную правку (и не
         # пометить файл «грязным» до того, как обновится last_sync_md5)
@@ -3425,7 +3559,8 @@ class MainWindow(QMainWindow):
 
     # ── Уведомления трея (PLANS 4.5) ───────────────────────
 
-    def _notify(self, title: str, body: str) -> None:
+    def _notify(self, title: str, body: str,
+                icon=QSystemTrayIcon.Information) -> None:
         """Показать уведомление Windows в трее (если трей есть)."""
         tray = getattr(self, "_tray", None)
         if tray is None or not body:
@@ -3433,22 +3568,22 @@ class MainWindow(QMainWindow):
         try:
             show = getattr(tray, "showMessage", None)
             if callable(show):
-                show(title, body, QSystemTrayIcon.Information, 5000)
+                show(title, body, icon, 5000)
         except Exception:  # noqa: BLE001 — уведомление не должно ломать передачу
             logger.warning("Не удалось показать уведомление трея")
 
     def _schedule_transfer_notification(self, cloud_path: str, kind: str) -> None:
-        """Запомнить завершённую передачу и отложить показ уведомления.
+        """Запомнить завершённое скачивание и отложить показ уведомления.
 
-        Пачка файлов (bulk-скачивание/загрузка) даёт одно сообщение:
-        таймер перезапускается на каждом файле и показывает сводку
-        через 1.5 с после последнего.
+        Успешная выгрузка в облако уведомлений НЕ даёт (PLANS 3.11),
+        поэтому для kind="upload" функция сразу выходит.
+        Пачка скачанных файлов даёт одно сообщение: таймер перезапускается
+        на каждом файле и показывает сводку через 1.5 с после последнего.
         """
+        if kind != "download":
+            return
         name = os.path.basename(cloud_path.rstrip("/")) or cloud_path
-        if kind == "upload":
-            self._pending_upload_notifs.append(name)
-        else:
-            self._pending_download_notifs.append(name)
+        self._pending_download_notifs.append(name)
         if self._notif_timer is None:
             self._notif_timer = QTimer(self)
             self._notif_timer.setSingleShot(True)
@@ -3456,12 +3591,10 @@ class MainWindow(QMainWindow):
         self._notif_timer.start(1500)
 
     def _flush_transfer_notifications(self) -> None:
-        """Показать накопленные уведомления и очистить очереди."""
-        for names, kind in ((self._pending_download_notifs, "download"),
-                            (self._pending_upload_notifs, "upload")):
-            if not names:
-                continue
-            title, body = build_transfer_notification(names, kind)
+        """Показать накопленные уведомления о скачивании и очистить очередь."""
+        names = self._pending_download_notifs
+        if names:
+            title, body = build_transfer_notification(names, "download")
             self._notify(title, body)
             names.clear()
 
@@ -3594,7 +3727,7 @@ class MainWindow(QMainWindow):
                     if not unchanged and os.path.exists(local_path) \
                             and _md5_file(local_path) != sent_md5:
                         self._dirty_uploads.add(cloud_path)
-                    self._schedule_transfer_notification(cloud_path, "upload")
+                    # Уведомление об успешной выгрузке не показываем (PLANS 3.11)
                     # Освобождаем слот и запускаем следующий из очереди
                     self._active_uploads = max(0, self._active_uploads - 1)
                     self._process_upload_queue()
@@ -3634,6 +3767,10 @@ class MainWindow(QMainWindow):
                and hasattr(self, '_current_path') and self._current_path:
                 self._uploads_refreshed = True
                 self._navigate_to_folder(self._current_path)
+
+        # Статус трея/заголовка тоже должен вернуться в «готово», когда
+        # все очереди опустели (и наоборот — показать «синхронизация»).
+        self._refresh_app_status()
 
     def _process_net_events(self):
         """Разобрать события сетевых блокировок из net_heal (главный поток)."""
@@ -4476,6 +4613,7 @@ class MainWindow(QMainWindow):
         if getattr(self, '_bulk_sync_running', False):
             return
         self._bulk_sync_running = True
+        self._refresh_app_status()
         logger.info("Bulk sync: starting full file scan...")
         thread = _AllFilesThread(self._api, self._db, self)
         thread.finished.connect(self._on_bulk_sync_complete)
@@ -4488,6 +4626,7 @@ class MainWindow(QMainWindow):
     def _on_bulk_sync_complete(self, total: int):
         """После AllFilesThread — найти файлы, изменившиеся в облаке."""
         self._bulk_sync_running = False
+        self._refresh_app_status()
         if total == 0:
             logger.info("Bulk sync: no files loaded, nothing to check")
             return
@@ -5938,7 +6077,7 @@ class MainWindow(QMainWindow):
         _show_settings).
         """
         box = QMessageBox(self)
-        box.setWindowTitle("YaDisk Manager")
+        box.setWindowTitle(APP_NAME)
         icon = self.windowIcon()
         if icon.isNull():
             icon = MainWindow._pick_window_icon()
@@ -6291,13 +6430,16 @@ class MainWindow(QMainWindow):
                 self.saveGeometry().toBase64().data().decode())
             self._log_window.save_position()
         self._save_table_header_state()
+        # Инбокс PLANS: лог — спутник Менеджера, скрывается вместе с ним
+        # (иначе остаётся сиротливое окно без значка на панели задач)
+        self._hide_log_with_manager()
         self.hide()
         event.ignore()  # не закрывать — сворачиваем в трей
         # Уведомление при первом сворачивании
         if self._first_close_hint:
             self._first_close_hint = False
             self._tray.showMessage(
-                "YaDisk Manager",
+                APP_NAME,
                 "Окно свёрнуто в трей.\n"
                 "Нажмите на значок программы, чтобы открыть его снова.",
                 QSystemTrayIcon.Information, 5000)

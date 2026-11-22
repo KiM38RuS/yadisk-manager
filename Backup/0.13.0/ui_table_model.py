@@ -13,7 +13,8 @@ except ImportError:  # не-Windows (например, в тестах)
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, QByteArray, QSortFilterProxyModel
 from PySide6.QtGui import QColor, QPalette, QPainter
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QStyledItemDelegate, QStyle, QStyleOptionViewItem,
+    QApplication, QAbstractItemView, QHeaderView, QStyledItemDelegate,
+    QStyle, QStyleOptionViewItem,
 )
 
 import db
@@ -243,6 +244,11 @@ def apply_table_header_defaults(view) -> "QHeaderView":
     """
     header = view.horizontalHeader()
     header.setSectionsMovable(True)
+    # Диапазон горизонтального скролла считаем в пикселях, а не в колонках:
+    # в ScrollPerItem полоса появляется/меняется только после отпускания ЛКМ
+    # (во время перетаскивания границы sectionResized приходит, но диапазон
+    # в колонках не пересчитывается). ScrollPerPixel обновляет max сразу.
+    view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
     model = view.model()
     columns = model.columnCount() if model is not None else 0
     for col in range(columns):

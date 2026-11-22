@@ -120,6 +120,19 @@ class TestGetChildren:
         assert children == []
 
 
+def test_batch_aggregate_empty_folder_uses_own_status(in_memory_db):
+    """Пустая папка наследует собственный статус, а не хардкод 'cloud_only'."""
+    in_memory_db.upsert_file("/Пусто", "Пусто", "dir")
+    in_memory_db.set_downloaded("/Пусто", "/cache/Пусто")
+    assert in_memory_db.get_folder_batch_aggregate_status(
+        "/", ["/Пусто"])["/Пусто"] == "downloaded"
+
+    # Папка, которая никогда не скачивалась, остаётся «в облаке»
+    in_memory_db.upsert_file("/ТолькоОблако", "ТолькоОблако", "dir")
+    assert in_memory_db.get_folder_batch_aggregate_status(
+        "/", ["/ТолькоОблако"])["/ТолькоОблако"] == "cloud_only"
+
+
 class TestFolderStatus:
     """Tests for is_folder_fully_synced() — THE critical logic."""
 

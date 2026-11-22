@@ -23,8 +23,6 @@ def test_single_file_notification_text():
     from ui_shared import build_transfer_notification
     assert build_transfer_notification(["отчёт.docx"], "download") == \
         ("Скачано", "отчёт.docx")
-    assert build_transfer_notification(["отчёт.docx"], "upload") == \
-        ("Загружено", "отчёт.docx")
 
 
 def test_bulk_notification_text_is_aggregated():
@@ -37,7 +35,7 @@ def test_bulk_notification_text_is_aggregated():
 
 def test_bulk_two_files_plural():
     from ui_shared import build_transfer_notification
-    assert build_transfer_notification(["a", "b"], "upload")[1] == "2 файла: a, b"
+    assert build_transfer_notification(["a", "b"], "download")[1] == "2 файла: a, b"
 
 
 # ── очередь уведомлений в MainWindow ──────────────────────────────
@@ -66,17 +64,33 @@ def test_schedule_accumulates_and_flushes_once(qapp):
     mw._notify.assert_not_called()
 
 
-def test_download_and_upload_are_reported_separately(qapp):
+def test_upload_completion_is_never_scheduled(qapp):
+    """Успешная выгрузка в облако не попадает в очередь уведомлений."""
     import ui as ui_mod
 
     mw = MagicMock()
-    mw._pending_download_notifs = ["скачан.txt"]
+    from PySide6.QtCore import QTimer
+
+    mw._pending_download_notifs = []
+    mw._pending_upload_notifs = []
+    mw._notif_timer = QTimer()
+
+    ui_mod.MainWindow._schedule_transfer_notification(mw, "/a.txt", "upload")
+
+    assert mw._pending_upload_notifs == []
+    mw._notify.assert_not_called()
+
+
+def test_upload_queue_is_never_reported(qapp):
+    import ui as ui_mod
+
+    mw = MagicMock()
+    mw._pending_download_notifs = []
     mw._pending_upload_notifs = ["загружен.txt"]
 
     ui_mod.MainWindow._flush_transfer_notifications(mw)
 
-    titles = [c.args[0] for c in mw._notify.call_args_list]
-    assert titles == ["Скачано", "Загружено"]
+    mw._notify.assert_not_called()
 
 
 def test_notify_respects_disabled_state_and_missing_tray(qapp):
